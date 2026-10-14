@@ -3,8 +3,8 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.environ['BOT_TOKEN']
 CHANNEL = "@ErtorSH" 
-SUPPORT = "@Amir_Ertor"
+SUPPORT = "@@MeHDii_SiD"
 ADMIN_ID = 7658686650
-CARD_NUMBER = "6037-99XX-XXXX-XXXX" 
-CARD_OWNER = "MEHDI SERVICES"             
+CARD_NUMBER = "6219861973614059" 
+CARD_OWNER = "نوری"             
 ADMIN_USERNAME = "@MeHDii_SiD"

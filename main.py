@@ -241,7 +241,8 @@ def check_membership(call):
 @bot.message_handler(func=lambda m: m.chat.id in SUPPORT_MODE,
                      content_types=['text', 'photo', 'video', 'voice', 'audio', 'document', 'sticker'])
 def support_chat(message):
-    if message.text and (message.text == SUPPORT_EXIT or message.text.startswith("/")):
+    if message.text and (message.text == SUPPORT_EXIT or message.text.startswith("/")
+                         or message.text in MENU_TEXTS):
         SUPPORT_MODE.discard(message.chat.id)
         bot.send_message(message.chat.id, "🔙 از گفتگو با پشتیبانی خارج شدی.", reply_markup=main_kb)
         return
@@ -332,6 +333,38 @@ def pay_page(call):
         return
     _, name, price, desc, extra, avail = row
     price_txt = price if price and price != "-" else "توافقی — به پشتیبانی پیام بده"
+    txt = f"""💳 روش پرداخت
+━━━━━━━━━━
+📦 محصول: {name}
+💰 مبلغ: {price_txt}
+━━━━━━━━━━
+روش پرداخت رو انتخاب کن 👇"""
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("💳 پرداخت کارت به کارت", callback_data=f"card:{key}"))
+    kb.add(InlineKeyboardButton("🏦 پرداخت از درگاه (به‌زودی)", callback_data="soon"))
+    kb.add(InlineKeyboardButton("₿ پرداخت با ارز دیجیتال (به‌زودی)", callback_data="soon"))
+    kb.add(InlineKeyboardButton("🅿️ پرداخت با PayPal (به‌زودی)", callback_data="soon"))
+    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"prod:{key}"))
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
+    except Exception:
+        pass
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "soon")
+def pay_soon(call):
+    bot.answer_callback_query(call.id, "🚧 این روش پرداخت به‌زودی فعاله!", show_alert=True)
+
+    
+@bot.callback_query_handler(func=lambda c: c.data.startswith("card:"))
+def card_page(call):
+    key = call.data.split(":", 1)[1]
+    row = get_product(key)
+    if not row:
+        bot.answer_callback_query(call.id, "⚠️ این محصول حذف شده!")
+        return
+    _, name, price, desc, extra, avail = row
+    price_txt = price if price and price != "-" else "توافقی — به پشتیبانی پیام بده"
     txt = f"""🧾 فاکتور سفارش
 ━━━━━━━━━━
 📦 محصول: {name}
@@ -344,7 +377,7 @@ def pay_page(call):
 ✅ بعد از واریز، دکمه زیر رو بزن و فیش رو بفرست"""
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("✅ واریز کردم — ارسال فیش", callback_data=f"receipt:{key}"))
-    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"prod:{key}"))
+    kb.add(InlineKeyboardButton("🔙 بازگشت به روش پرداخت", callback_data=f"pay:{key}"))
     try:
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
     except Exception:
@@ -903,8 +936,59 @@ def p_edit_price(message, key):
 def p_add(call):
     if call.from_user.id != config.ADMIN_ID: return
     bot.answer_callback_query(call.id)
+    txt = (
+        "🛍 <b>افزودن محصول</b>\n"
+        "━━━━━━━━━━\n"
+        "📌 از لیست زیر خدمت مورد نظر رو انتخاب کن:\n\n"
+        "✨ اسم و فرم سفارش هر خدمت خودکار آماده می‌شه —\n"
+        "فقط قیمتشو مشخص می‌کنی!"
+    )
+    kb = InlineKeyboardMarkup(row_width=1)
+    for key, name, price, desc, extra in DEFAULT_PRODUCTS:
+        kb.add(InlineKeyboardButton(name, callback_data=f"addtpl:{key}"))
+    kb.add(InlineKeyboardButton("✏️ محصول کاملاً جدید (خارج از لیست)", callback_data="addnew"))
+    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data="adm:products"))
+    try_edit(call.message.chat.id, call.message.message_id, txt, kb)
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "addnew")
+def p_add_new(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    bot.answer_callback_query(call.id)
     msg = bot.send_message(config.ADMIN_ID, "🛍 (۱) نام محصول رو بفرست:")
     bot.register_next_step_handler(msg, p_add_name)
+
+
+def p_tpl_price(message, key, name, extra):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n💰 قیمت:", p_tpl_price, key, name, extra)
+    save_product(key, name, message.text, "-", extra)
+    bot.send_message(config.ADMIN_ID,
+        f"✅ «{name}» با قیمت «{message.text}» ثبت شد!\n"
+        "الان تو لیست محصولات کاربرا هست 🛍",
+        reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("addtpl:"))
+def p_add_template(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    key = call.data.split(":", 1)[1]
+    tpl = next((t for t in DEFAULT_PRODUCTS if t[0] == key), None)
+    if not tpl:
+        bot.answer_callback_query(call.id, "⚠️ قالب پیدا نشد!")
+        return
+    bot.answer_callback_query(call.id)
+    _, name, price, desc, extra = tpl
+    fields = [f.strip() for f in extra.split("|") if f.strip()] if extra and extra != "-" else []
+    fields_txt = "\n".join(f"  ▪️ {f}" for f in fields) if fields else "  ▪️ (بدون فرم — مستقیم فیش)"
+    msg = bot.send_message(config.ADMIN_ID,
+        f"💰 قیمت «{name}» رو بفرست:\n\n"
+        "━━━━━━━━━━\n"
+        f"📋 فرم سفارش این خدمت:\n{fields_txt}\n"
+        "━━━━━━━━━━\n\n"
+        "✍️ قیمت رو بنویس (برای توافقی «-»):")
+    bot.register_next_step_handler(msg, p_tpl_price, key, name, extra)
+
 
 def p_add_name(message):
     if is_cancel(message): return cancel_action(message)
