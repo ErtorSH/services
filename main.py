@@ -25,6 +25,11 @@ btn5 = "پنل ادمین💻"
 btn6 = "معرفی به دوستان🎭"
 btn7 = "سفارش های من💎"
 
+WELCOME_MESSAGE = """
+    سلام به ربات خدمات مجازی ONYX خوش اومدید🎉
+از دکمه های زیر استفاده کنید🤍
+    """
+
 main_kb = ReplyKeyboardMarkup(resize_keyboard=True)
 main_kb.add(KeyboardButton(btn1),KeyboardButton(btn2))
 main_kb.add(KeyboardButton(btn4))
@@ -38,19 +43,12 @@ def welcome(message):
             "سلام! برای استفاده از ربات اول عضو کانال شو 👇",
             reply_markup=join_kb)
         return
-    WELCOME_MESSAGE = """
-    سلام به ربات خدمات مجازی ONYX خوش اومدید🎉
-از دکمه های زیر استفاده کنید🤍
-    """
-    bot.send_message(message.chat.id,WELCOME_MESSAGE)
+
+    bot.send_message(message.chat.id, WELCOME_MESSAGE, reply_markup=main_kb)
 
 #عضویت اجباری
 @bot.callback_query_handler(func=lambda call: call.data == "check_membership")
 def check_membership(call):
-    WELCOME_MESSAGE = """
-    سلام به ربات خدمات مجازی ONYX خوش اومدید🎉
-از دکمه های زیر استفاده کنید🤍
-    """
     if is_member(call.from_user.id):
         bot.answer_callback_query(call.id, "✅ عضویت تایید شد!")
         bot.edit_message_text("✅ عضویت تایید شد!", call.message.chat.id, call.message.message_id)
