@@ -188,8 +188,9 @@ def get_bot_username():
     return BOT_USERNAME
 
 def is_cancel(message):
-    return (not message.text) or message.text.startswith("/") or message.text in MENU_TEXTS
-
+    if message.text:
+        return message.text.startswith("/") or message.text in MENU_TEXTS
+    return False
 def cancel_action(message):
     SUPPORT_MODE.discard(message.chat.id)
     bot.send_message(message.chat.id, "❌ عملیات لغو شد.", reply_markup=main_kb)
