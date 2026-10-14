@@ -222,6 +222,19 @@ def welcome(message):
             txt += f"\n\n🎉 تو با لینک دعوت {inviter} اومدی — خوش اومدی!"
     bot.send_message(message.chat.id, txt, reply_markup=main_kb)
 
+
+
+@bot.callback_query_handler(func=lambda c: c.data == "check_membership")
+def check_membership(call):
+    if is_member(call.from_user.id):
+        bot.answer_callback_query(call.id, "✅ عضویت تایید شد!")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        bot.send_message(call.message.chat.id, WELCOME, reply_markup=main_kb)
+    else:
+        bot.answer_callback_query(call.id, "هنوز عضو نشدی! اول عضو کانال شو 😅", show_alert=True)
 # ==================== حالت پشتیبانی (کاربر → ادمین) ====================
 
 @bot.message_handler(func=lambda m: m.chat.id in SUPPORT_MODE,
