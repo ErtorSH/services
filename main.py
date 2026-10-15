@@ -5,6 +5,7 @@ from datetime import datetime
 import time
 import sqlite3
 import config
+import html as html_mod
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -14,6 +15,7 @@ DB_NAME = "onyx.db"
 SUPPORT_MODE = set()
 pending_broadcast = None
 BOT_USERNAME = None
+pending_wh_post = None
 
 # ==================== دیتابیس ====================
 
@@ -80,6 +82,8 @@ def init_db():
     cur.execute("UPDATE users SET wallet_notified=0 WHERE wallet_notified IS NULL")
     cur.execute("UPDATE sub_products SET min_qty='-' WHERE min_qty IS NULL")
     cur.execute("UPDATE sub_products SET max_qty='-' WHERE max_qty IS NULL")
+    cur.execute("""CREATE TABLE IF NOT EXISTS settings(
+        k TEXT PRIMARY KEY, value TEXT)""")
     if not cur.execute("SELECT 1 FROM products LIMIT 1").fetchone():
         cur.executemany("INSERT INTO products VALUES(?,?,?,?,?,1)", DEFAULT_PRODUCTS)
     con.commit(); con.close()
@@ -236,6 +240,20 @@ def recent_supports():
 
 def invited_list(uid):
     con = db(); r = con.execute("SELECT name FROM users WHERE referrer_id=?", (uid,)).fetchall(); con.close(); return r
+
+# ----- تنظیمات (چنل انبار) -----
+
+def get_setting(key, default=None):
+    con = db()
+    r = con.execute("SELECT value FROM settings WHERE k=?", (key,)).fetchone()
+    con.close()
+    return r["value"] if r else default
+
+def set_setting(key, value):
+    con = db(); cur = con.cursor()
+    cur.execute("INSERT OR REPLACE INTO settings(k, value) VALUES(?,?)", (key, value))
+    con.commit(); con.close()
+
 
 # ==================== عضویت اجباری ====================
 
@@ -995,8 +1013,10 @@ def admin_kb():
     kb.add(InlineKeyboardButton("🛍 مدیریت محصولات", callback_data="adm:products"),
            InlineKeyboardButton("💬 مکالمات", callback_data="adm:support"))
     kb.add(InlineKeyboardButton("💰 کیف پول‌ها", callback_data="adm:wallets"),
-           InlineKeyboardButton("🏠 منوی اصلی", callback_data="adm:menu"))
+           InlineKeyboardButton("📦 چنل انبار", callback_data="adm:warehouse"))
+    kb.add(InlineKeyboardButton("🏠 منوی اصلی", callback_data="adm:menu"))
     return kb
+
 
 @bot.message_handler(func=lambda m: m.text == btn5)
 def admin_panel(message):
@@ -1057,6 +1077,27 @@ def admin_actions(call):
         kb.add(InlineKeyboardButton("🔙 پنل", callback_data="admback"))
         return try_edit(chat, mid, txt, kb)
 
+        if act == "warehouse":
+        ch = get_setting("warehouse_channel")
+        if ch:
+            txt = (f"📦 چنل انبار\n"
+                   "━━━━━━━━━━\n"
+                   f"🔗 چنل فعلی: {ch}\n\n"
+                   "ℹ️ وقتی زیرمحصول جدید اضافه کنی، ازت می‌پرسه\n"
+                   "که تو چنل پستش کنه یا نه ✅")
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("✏️ تغییر چنل", callback_data="whset"))
+        else:
+            txt = ("📦 چنل انبار\n"
+                   "━━━━━━━━━━\n"
+                   "❌ هنوز چنلی ثبت نشده!\n\n"
+                   "ℹ️ با ثبت چنل انبار، بعد از افزودن هر زیرمحصول\n"
+                   "ازت می‌پرسه که با فرم تبلیغاتی تو چنل پست بشه.")
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("➕ ثبت چنل", callback_data="whset"))
+        kb.add(InlineKeyboardButton("🔙 پنل", callback_data="admback"))
+        return try_edit(chat, mid, txt, kb)
+    
     if act == "broadcast":
         msg = bot.send_message(chat, "📢 متن پیام همگانی رو بفرست:\n(برای لغو /cancel)")
         return bot.register_next_step_handler(msg, bc_text)
@@ -1537,14 +1578,107 @@ def sub_add_min(message, key, name, price):
     bot.register_next_step_handler(msg, sub_add_max, key, name, price, message.text)
 
 def sub_add_max(message, key, name, price, mn):
+    global pending_wh_post
     if is_cancel(message): return cancel_action(message)
     if not message.text:
         return reask(config.ADMIN_ID, "⚠️ متنی بفرست:", sub_add_max, key, name, price, mn)
-    save_sub_product(key, name, price, mn, message.text)
+    mx = message.text
+    save_sub_product(key, name, price, mn, mx)
+    ch = get_setting("warehouse_channel")
+    if not ch:
+        bot.send_message(config.ADMIN_ID,
+            f"✅ «{name}» به دستگاه اضافه شد!\n"
+            "الان کاربرا می‌تونن ببیننش 🛍\n\n"
+            "💡 برای پست خودکار تو چنل انبار، اول از پنل ادمین چنل رو ثبت کن.",
+            reply_markup=admin_kb())
+        return
+    pending_wh_post = (key, name, price, mn)
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ آره، پستش کن", callback_data="whpost:yes"),
+           InlineKeyboardButton("❌ نه، لازم نیست", callback_data="whpost:no"))
     bot.send_message(config.ADMIN_ID,
-        f"✅ «{name}» به دستگاه اضافه شد!\nالان کاربرا می‌تونن ببیننش 🛍",
-        reply_markup=admin_kb())
+        f"✅ «{name}» به دستگاه اضافه شد!\n\n"
+        "📦 این محصول تو چنل انبار هم پست بشه؟",
+        reply_markup=kb)
 
+# ==================== چنل انبار ====================
+
+@bot.callback_query_handler(func=lambda c: c.data == "whset")
+def wh_set(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(config.ADMIN_ID,
+        "📦 آیدی چنل انبار رو بفرست (مثل @onyx_store):\n\n"
+        "⚠️ قبلش حتماً ربات رو تو چنل «ادمین» کن با دسترسی ارسال پیام!\n"
+        "❌ برای لغو /cancel")
+    bot.register_next_step_handler(msg, wh_save)
+
+def wh_save(message):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n📦 آیدی چنل (مثل @onyx_store):", wh_save)
+    ch = message.text.strip()
+    try:
+        test = bot.send_message(ch, "🔌 تست اتصال چنل انبار...")
+        try:
+            bot.delete_message(ch, test.message_id)
+        except Exception:
+            pass
+    except Exception:
+        return reask(config.ADMIN_ID,
+            "❌ نتونستم به این چنل پیام بدم!\n"
+            "مطمئن شو ربات تو چنل «ادمین» شده با دسترسی ارسال پیام.\n\n"
+            "📦 دوباره آیدی چنل رو بفرست:", wh_save)
+    set_setting("warehouse_channel", ch)
+    bot.send_message(config.ADMIN_ID, f"✅ چنل انبار ثبت شد: {ch}", reply_markup=admin_kb())
+
+def warehouse_post_text(key, name, price, mn):
+    device = get_product(key)
+    dname = device["name"] if device else ""
+    price_txt = price if price and price != "-" else "توافقی — دایرکت پیام بده"
+    bot_user = f"@{get_bot_username()}"
+    txt = (
+        "<b>𓆩 𝐎𝐍𝐘𝐗 𝐒𝐓𝐎𝐑𝐄 𓆪</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n\n"
+        f"⭐ <b>{html_mod.escape(name)}</b>\n\n"
+        f"{html_mod.escape(dname)}\n\n"
+    )
+    if mn and mn != "-":
+        txt += f"▪️ حداقل سفارش: {html_mod.escape(mn)} عدد\n"
+    txt += (
+        f"▪️ قیمت هر عدد: {html_mod.escape(price_txt)}\n\n"
+        "💎 ساده، شیک و اقتصادی\n\n"
+        "🛍 ثبت سفارش از طریق ربات:\n"
+        f"🤖 {bot_user}\n\n"
+        f"👤 ارتباط مستقیم: {config.ADMIN_USERNAME}\n\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "<b>𓆩 𝐎𝐍𝐘𝐗 𝐒𝐓𝐎𝐑𝐄 𓆪 🖤</b>"
+    )
+    return txt
+
+@bot.callback_query_handler(func=lambda c: c.data in ("whpost:yes", "whpost:no"))
+def wh_post_action(call):
+    global pending_wh_post
+    if call.from_user.id != config.ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    if not pending_wh_post:
+        return try_edit(call.message.chat.id, call.message.message_id, "⚠️ چیزی برای پست نیست!", None)
+    if call.data == "whpost:no":
+        pending_wh_post = None
+        return try_edit(call.message.chat.id, call.message.message_id,
+                        "❌ پست در چنل انبار لغو شد.", None)
+    key, name, price, mn = pending_wh_post
+    pending_wh_post = None
+    ch = get_setting("warehouse_channel")
+    try:
+        bot.send_message(ch, warehouse_post_text(key, name, price, mn),
+                         parse_mode="HTML", disable_web_page_preview=True)
+        try_edit(call.message.chat.id, call.message.message_id,
+                 "✅ تو چنل انبار پست شد! 📦", None)
+    except Exception:
+        try_edit(call.message.chat.id, call.message.message_id,
+                 "❌ ارسال به چنل نشد!\n"
+                 "ربات رو تو چنل ادمین کن (دسترسی ارسال پیام) و دوباره امتحان کن.", None)
 
 if __name__ == "__main__":
     init_db()
