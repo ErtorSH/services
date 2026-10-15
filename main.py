@@ -1077,7 +1077,7 @@ def admin_actions(call):
         kb.add(InlineKeyboardButton("🔙 پنل", callback_data="admback"))
         return try_edit(chat, mid, txt, kb)
 
-        if act == "warehouse":
+    if act == "warehouse":
         ch = get_setting("warehouse_channel")
         if ch:
             txt = (f"📦 چنل انبار\n"
@@ -1097,7 +1097,7 @@ def admin_actions(call):
             kb.add(InlineKeyboardButton("➕ ثبت چنل", callback_data="whset"))
         kb.add(InlineKeyboardButton("🔙 پنل", callback_data="admback"))
         return try_edit(chat, mid, txt, kb)
-    
+
     if act == "broadcast":
         msg = bot.send_message(chat, "📢 متن پیام همگانی رو بفرست:\n(برای لغو /cancel)")
         return bot.register_next_step_handler(msg, bc_text)
