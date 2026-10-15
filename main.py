@@ -5,48 +5,25 @@ from datetime import datetime
 import time
 import sqlite3
 import config
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
 
 bot = TeleBot(config.TOKEN)
 DB_NAME = "onyx.db"
-SUPPORT_MODE = set()      
-pending_broadcast = None    
+SUPPORT_MODE = set()
+pending_broadcast = None
 BOT_USERNAME = None
 
 # ==================== دیتابیس ====================
 
 def db():
-    return sqlite3.connect(DB_NAME)
+    con = sqlite3.connect(DB_NAME)
+    con.row_factory = sqlite3.Row   # ⚠️ فیکس اصلی — دسترسی با اسم ستون
+    return con
 
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M")
-
-def init_db():
-    con = db(); cur = con.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS users(
-        user_id INTEGER PRIMARY KEY, name TEXT, username TEXT,
-        referrer_id INTEGER, joined_at TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS orders(
-        order_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
-        product_name TEXT, details TEXT, price TEXT, status TEXT, created_at TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS faq(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT, answer TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS products(
-        key TEXT PRIMARY KEY, name TEXT, price TEXT,
-        description TEXT, extra TEXT, available INTEGER DEFAULT 1)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS support(
-        user_id INTEGER PRIMARY KEY, name TEXT, username TEXT, last_time TEXT)""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS sub_products(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        device_key TEXT,
-        name TEXT, price TEXT, available INTEGER DEFAULT 1)""")
-    try:
-        cur.execute("ALTER TABLE sub_products ADD COLUMN min_qty TEXT")
-        cur.execute("ALTER TABLE sub_products ADD COLUMN max_qty TEXT")
-    except Exception:
-        pass
-    if not cur.execute("SELECT 1 FROM products LIMIT 1").fetchone():
-        cur.executemany("INSERT INTO products VALUES(?,?,?,?,?,1)", DEFAULT_PRODUCTS)
-    con.commit(); con.close()
 
 DEFAULT_PRODUCTS = [
     ("stars",        "⭐️ استارز تلگرام",                        "دونه‌ای ۴,۵۰۰ تومان", "", "تعداد استارز|یوزرنیم چنل یا پست"),
@@ -68,52 +45,51 @@ DEFAULT_PRODUCTS = [
     ("virtual_num",  "📱 شماره مجازی",                          "-", "", "کشور مورد نظر"),
 ]
 
+def init_db():
+    con = db(); cur = con.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS users(
+        user_id INTEGER PRIMARY KEY, name TEXT, username TEXT,
+        referrer_id INTEGER, joined_at TEXT,
+        points INTEGER DEFAULT 0, wallet_notified INTEGER DEFAULT 0)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS orders(
+        order_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+        product_name TEXT, details TEXT, price TEXT, status TEXT, created_at TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS faq(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT, answer TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS products(
+        key TEXT PRIMARY KEY, name TEXT, price TEXT,
+        description TEXT, extra TEXT, available INTEGER DEFAULT 1)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS support(
+        user_id INTEGER PRIMARY KEY, name TEXT, username TEXT, last_time TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS sub_products(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, device_key TEXT,
+        name TEXT, price TEXT, available INTEGER DEFAULT 1,
+        min_qty TEXT DEFAULT '-', max_qty TEXT DEFAULT '-')""")
+    # ستون‌های جدید برای دیتابیس‌های قدیمی
+    for col in ("points", "wallet_notified"):
+        try:
+            cur.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+        except Exception:
+            pass
+    for col in ("min_qty", "max_qty"):
+        try:
+            cur.execute(f"ALTER TABLE sub_products ADD COLUMN {col} TEXT DEFAULT '-'")
+        except Exception:
+            pass
+    cur.execute("UPDATE users SET points=0 WHERE points IS NULL")
+    cur.execute("UPDATE users SET wallet_notified=0 WHERE wallet_notified IS NULL")
+    cur.execute("UPDATE sub_products SET min_qty='-' WHERE min_qty IS NULL")
+    cur.execute("UPDATE sub_products SET max_qty='-' WHERE max_qty IS NULL")
+    if not cur.execute("SELECT 1 FROM products LIMIT 1").fetchone():
+        cur.executemany("INSERT INTO products VALUES(?,?,?,?,?,1)", DEFAULT_PRODUCTS)
+    con.commit(); con.close()
+
 # ---------- توابع دیتابیس ----------
-
-def all_sub_products(device_key):
-    con = db()
-    rows = con.execute("SELECT * FROM sub_products WHERE device_key=? ORDER BY id",
-                       (device_key,)).fetchall()
-    con.close(); return rows
-
-def save_sub_product(device_key, name, price, min_qty="-", max_qty="-"):
-    con = db(); cur = con.cursor()
-    cur.execute("INSERT INTO sub_products(device_key, name, price, min_qty, max_qty) VALUES(?,?,?,?,?)",
-                (device_key, name, price, min_qty, max_qty))
-    con.commit(); con.close()
-
-def get_sub_product(sid):
-    con = db()
-    row = con.execute("SELECT * FROM sub_products WHERE id=?", (sid,)).fetchone()
-    con.close(); return row
-
-def save_sub_product(device_key, name, price):
-    con = db(); cur = con.cursor()
-    cur.execute("INSERT INTO sub_products(device_key, name, price) VALUES(?,?,?)",
-                (device_key, name, price))
-    con.commit(); con.close()
-
-def delete_sub_product(sid):
-    con = db()
-    con.execute("DELETE FROM sub_products WHERE id=?", (sid,))
-    con.commit(); con.close()
-
-def toggle_sub_product(sid):
-    con = db()
-    con.execute("UPDATE sub_products SET available = 1 - available WHERE id=?", (sid,))
-    con.commit(); con.close()
-
-
-def save_user(uid, first, username, referrer=None):
-    con = db(); cur = con.cursor()
-    cur.execute("INSERT OR IGNORE INTO users VALUES(?,?,?,?,?)",
-                (uid, first, username, referrer, now()))
-    is_new = cur.rowcount > 0
-    con.commit(); con.close()
-    return is_new
 
 def count(sql, *args):
     con = db(); r = con.execute(sql, args).fetchone()[0]; con.close(); return r
+
+# ----- محصولات اصلی (دستگاه‌ها) -----
 
 def get_product(key):
     con = db(); r = con.execute("SELECT * FROM products WHERE key=?", (key,)).fetchone(); con.close(); return r
@@ -135,6 +111,81 @@ def delete_product(key):
 def set_price(key, price):
     con = db(); con.execute("UPDATE products SET price=? WHERE key=?", (price, key)); con.commit(); con.close()
 
+# ----- زیرمحصولات (محصولات داخل هر دستگاه) -----
+
+def all_sub_products(device_key):
+    con = db()
+    rows = con.execute("SELECT * FROM sub_products WHERE device_key=? ORDER BY id", (device_key,)).fetchall()
+    con.close(); return rows
+
+def save_sub_product(device_key, name, price, min_qty="-", max_qty="-"):
+    con = db(); cur = con.cursor()
+    cur.execute("INSERT INTO sub_products(device_key, name, price, min_qty, max_qty) VALUES(?,?,?,?,?)",
+                (device_key, name, price, min_qty, max_qty))
+    con.commit(); con.close()
+
+def get_sub_product(sid):
+    con = db()
+    row = con.execute("SELECT * FROM sub_products WHERE id=?", (sid,)).fetchone()
+    con.close(); return row
+
+def delete_sub_product(sid):
+    con = db()
+    con.execute("DELETE FROM sub_products WHERE id=?", (sid,))
+    con.commit(); con.close()
+
+def toggle_sub_product(sid):
+    con = db()
+    con.execute("UPDATE sub_products SET available = 1 - available WHERE id=?", (sid,))
+    con.commit(); con.close()
+
+def set_sub_price(sid, price):
+    con = db(); con.execute("UPDATE sub_products SET price=? WHERE id=?", (price, sid)); con.commit(); con.close()
+
+def set_sub_qty(sid, mn, mx):
+    con = db(); con.execute("UPDATE sub_products SET min_qty=?, max_qty=? WHERE id=?", (mn, mx, sid)); con.commit(); con.close()
+
+# ----- کاربران و پوینت -----
+
+def save_user(uid, first, username, referrer=None):
+    con = db(); cur = con.cursor()
+    cur.execute("""INSERT OR IGNORE INTO users(user_id, name, username, referrer_id, joined_at)
+                   VALUES(?,?,?,?,?)""", (uid, first, username, referrer, now()))
+    is_new = cur.rowcount > 0
+    con.commit(); con.close()
+    return is_new
+
+def get_points(uid):
+    con = db()
+    r = con.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
+    con.close()
+    return (r["points"] or 0) if r else 0
+
+def add_points(uid, amount):
+    con = db(); cur = con.cursor()
+    cur.execute("UPDATE users SET points = points + ? WHERE user_id=?", (amount, uid))
+    con.commit(); con.close()
+
+def wallet_notify(uid):
+    con = db()
+    r = con.execute("SELECT points, wallet_notified, name, username FROM users WHERE user_id=?", (uid,)).fetchone()
+    con.close()
+    if not r or (r["points"] or 0) < 50 or r["wallet_notified"]:
+        return
+    con = db(); con.execute("UPDATE users SET wallet_notified=1 WHERE user_id=?", (uid,)); con.commit(); con.close()
+    try:
+        bot.send_message(config.ADMIN_ID,
+            "🎉 یک کاربر به ۵۰ پوینت رسید!\n"
+            "━━━━━━━━━━\n"
+            f"👤 اسم: {r['name']}\n"
+            f"🔗 یوزرنیم: {r['username'] or 'ندارد'}\n"
+            f"🆔 آیدی عددی: {uid}\n"
+            f"💎 پوینت: {r['points']}")
+    except Exception:
+        pass
+
+# ----- سفارش‌ها -----
+
 def add_order(uid, pname, details, price):
     con = db(); cur = con.cursor()
     cur.execute("INSERT INTO orders(user_id, product_name, details, price, status, created_at) VALUES(?,?,?,?,?,?)",
@@ -146,14 +197,18 @@ def get_order(oid):
     con = db(); r = con.execute("SELECT * FROM orders WHERE order_id=?", (oid,)).fetchone(); con.close(); return r
 
 def user_orders(uid):
-    con = db(); r = con.execute("""SELECT order_id, product_name, status, created_at
-        FROM orders WHERE user_id=? ORDER BY order_id DESC""", (uid,)).fetchall(); con.close(); return r
+    con = db()
+    r = con.execute("""SELECT order_id, product_name, status, created_at
+        FROM orders WHERE user_id=? ORDER BY order_id DESC""", (uid,)).fetchall()
+    con.close(); return r
 
 def update_order_status(oid, status):
     con = db(); con.execute("UPDATE orders SET status=? WHERE order_id=?", (status, oid)); con.commit(); con.close()
 
 def all_user_ids():
     con = db(); r = con.execute("SELECT user_id FROM users").fetchall(); con.close(); return [x[0] for x in r]
+
+# ----- سوالات متداول -----
 
 def save_faq(q, a):
     con = db(); con.execute("INSERT INTO faq(question, answer) VALUES(?,?)", (q, a)); con.commit(); con.close()
@@ -167,13 +222,17 @@ def get_faq(fid):
 def del_faq(fid):
     con = db(); con.execute("DELETE FROM faq WHERE id=?", (fid,)); con.commit(); con.close()
 
+# ----- پشتیبانی و دعوت -----
+
 def touch_support(uid, name, username):
     con = db(); con.execute("INSERT OR REPLACE INTO support VALUES(?,?,?,?)", (uid, name, username, now()))
     con.commit(); con.close()
 
 def recent_supports():
-    con = db(); r = con.execute("""SELECT user_id, name, username, last_time FROM support
-        ORDER BY last_time DESC LIMIT 10""").fetchall(); con.close(); return r
+    con = db()
+    r = con.execute("""SELECT user_id, name, username, last_time FROM support
+        ORDER BY last_time DESC LIMIT 10""").fetchall()
+    con.close(); return r
 
 def invited_list(uid):
     con = db(); r = con.execute("SELECT name FROM users WHERE referrer_id=?", (uid,)).fetchall(); con.close(); return r
@@ -209,8 +268,9 @@ btn4 = "سوالات متداول"
 btn5 = "پنل ادمین💻"
 btn6 = "معرفی به دوستان🎭"
 btn7 = "سفارش های من💎"
+btn8 = "کیف پول💰"
 SUPPORT_EXIT = "🔙 خروج از پشتیبانی"
-MENU_TEXTS = {btn1, btn2, btn3, btn4, btn5, btn6, btn7, SUPPORT_EXIT}
+MENU_TEXTS = {btn1, btn2, btn3, btn4, btn5, btn6, btn7, btn8, SUPPORT_EXIT}
 
 WELCOME = """✨ به ربات خدمات مجازی ONYX خوش اومدید 🎉
 از دکمه‌های زیر استفاده کنید 🤍"""
@@ -219,6 +279,7 @@ main_kb = ReplyKeyboardMarkup(resize_keyboard=True)
 main_kb.add(KeyboardButton(btn1), KeyboardButton(btn2))
 main_kb.add(KeyboardButton(btn4))
 main_kb.add(KeyboardButton(btn7), KeyboardButton(btn6))
+main_kb.add(KeyboardButton(btn8))
 main_kb.add(KeyboardButton(btn3), KeyboardButton(btn5))
 
 support_kb = ReplyKeyboardMarkup(resize_keyboard=True)
@@ -234,6 +295,7 @@ def is_cancel(message):
     if message.text:
         return message.text.startswith("/") or message.text in MENU_TEXTS
     return False
+
 def cancel_action(message):
     SUPPORT_MODE.discard(message.chat.id)
     bot.send_message(message.chat.id, "❌ عملیات لغو شد.", reply_markup=main_kb)
@@ -259,14 +321,25 @@ def welcome(message):
         return
     txt = WELCOME
     if is_new and referrer:
-        inviter = None
-        con = db(); r = con.execute("SELECT name FROM users WHERE user_id=?", (referrer,)).fetchone(); con.close()
-        if r: inviter = r[0]
-        if inviter:
-            txt += f"\n\n🎉 تو با لینک دعوت {inviter} اومدی — خوش اومدی!"
+        con = db()
+        r = con.execute("SELECT name FROM users WHERE user_id=?", (referrer,)).fetchone()
+        con.close()
+        if r:
+            txt += f"\n\n🎉 تو با لینک دعوت {r['name']} اومدی — خوش اومدی!"
+            add_points(referrer, 10)
+            wallet_notify(referrer)
+            try:
+                bot.send_message(referrer,
+                    f"🎭 دعوت موفق!\n\n"
+                    f"👤 {message.from_user.first_name} با لینک تو ربات رو استارت زد\n"
+                    f"💰 ۱۰ پوینت به کیف پولت اضافه شد!")
+            except Exception:
+                pass
     bot.send_message(message.chat.id, txt, reply_markup=main_kb)
 
-
+@bot.message_handler(commands=['cancel'])
+def cancel_cmd(message):
+    cancel_action(message)
 
 @bot.callback_query_handler(func=lambda c: c.data == "check_membership")
 def check_membership(call):
@@ -279,6 +352,7 @@ def check_membership(call):
         bot.send_message(call.message.chat.id, WELCOME, reply_markup=main_kb)
     else:
         bot.answer_callback_query(call.id, "هنوز عضو نشدی! اول عضو کانال شو 😅", show_alert=True)
+
 # ==================== حالت پشتیبانی (کاربر → ادمین) ====================
 
 @bot.message_handler(func=lambda m: m.chat.id in SUPPORT_MODE,
@@ -298,18 +372,19 @@ def support_chat(message):
     except Exception:
         pass
 
-# ==================== محصولات ====================
+# ==================== محصولات (کاربر) ====================
 
 def products_kb():
     rows = all_products()
     kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(*[InlineKeyboardButton(name, callback_data=f"prod:{key}") for key, name, p, a in rows])
+    if rows:
+        kb.add(*[InlineKeyboardButton(name, callback_data=f"prod:{key}") for key, name, p, a in rows])
     kb.add(InlineKeyboardButton("🔙 منوی اصلی", callback_data="backmenu"))
     return kb
 
 def show_products(chat_id, text):
     bot.send_message(chat_id, text, reply_markup=products_kb())
-    
+
 @bot.message_handler(func=lambda m: m.text == btn1)
 @membership_required
 def products_handler(message):
@@ -346,7 +421,7 @@ def show_product(call):
     if not row:
         bot.answer_callback_query(call.id, "⚠️ این دستگاه حذف شده!")
         return
-    _, name, price, desc, extra, avail = row
+    name, price, desc, extra, avail = row["name"], row["price"], row["description"], row["extra"], row["available"]
     subs = all_sub_products(key)
     if not avail:
         kb = InlineKeyboardMarkup()
@@ -354,8 +429,7 @@ def show_product(call):
         try:
             bot.edit_message_text(
                 f"{name}\n\n❌ فعلاً موجود نیست!\nبه‌زودی دوباره در دسترس قرار می‌گیره 🙏",
-                call.message.chat.id, call.message.message_id,
-                reply_markup=kb)
+                call.message.chat.id, call.message.message_id, reply_markup=kb)
         except Exception:
             pass
         return bot.answer_callback_query(call.id)
@@ -371,9 +445,7 @@ def show_product(call):
     kb = InlineKeyboardMarkup()
     for s in subs:
         badge = "✅" if s["available"] else "❌"
-        kb.add(InlineKeyboardButton(
-            f"{s['name']} — {s['price']} {badge}",
-            callback_data=f"sub:{s['id']}"))
+        kb.add(InlineKeyboardButton(f"{s['name']} — {s['price']} {badge}", callback_data=f"sub:{s['id']}"))
     kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data="backprod"))
     try:
         bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
@@ -381,7 +453,198 @@ def show_product(call):
         pass
     bot.answer_callback_query(call.id)
 
-# ==================== فاکتور و فرم سفارش ====================
+# ==================== خرید زیرمحصول (مسیر اصلی) ====================
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sub:"))
+def sub_product_view(call):
+    sid = int(call.data.split(":", 1)[1])
+    s = get_sub_product(sid)
+    if not s:
+        bot.answer_callback_query(call.id, "⚠️ این محصول حذف شده!")
+        return
+    if not s["available"]:
+        bot.answer_callback_query(call.id, "❌ این محصول فعلاً ناموجوده!", show_alert=True)
+        return
+    device = get_product(s["device_key"])
+    dname = device["name"] if device else ""
+    has_limit = s["min_qty"] and s["min_qty"] != "-"
+    txt = (
+        f"{dname}\n"
+        f"🛍 محصول: {s['name']}\n"
+        "━━━━━━━━━━\n"
+        f"💰 قیمت: {s['price']}\n"
+        + (f"🔢 حداقل: {s['min_qty']} | حداکثر: {s['max_qty']}\n" if has_limit else "")
+        + "━━━━━━━━━━\n"
+        "آماده‌ی خریدی؟ 👇"
+    )
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("🛒 ثبت سفارش و پرداخت", callback_data=f"pay_sub:{sid}"))
+    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"prod:{s['device_key']}"))
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
+    except Exception:
+        pass
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("pay_sub:"))
+def pay_sub(call):
+    sid = int(call.data.split(":", 1)[1])
+    s = get_sub_product(sid)
+    if not s or not s["available"]:
+        return bot.answer_callback_query(call.id, "❌ ناموجود!", show_alert=True)
+    device = get_product(s["device_key"])
+    dname = device["name"] if device else ""
+    full_name = f"{dname} — {s['name']}"
+    price_txt = s["price"] if s["price"] and s["price"] != "-" else "توافقی — به پشتیبانی پیام بده"
+    txt = f"""💳 روش پرداخت
+━━━━━━━━━━
+📦 محصول: {full_name}
+💰 مبلغ: {price_txt}
+━━━━━━━━━━
+روش پرداخت رو انتخاب کن 👇"""
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("💳 پرداخت کارت به کارت", callback_data=f"card_sub:{sid}"))
+    kb.add(InlineKeyboardButton("🏦 پرداخت از درگاه (به‌زودی)", callback_data="soon"))
+    kb.add(InlineKeyboardButton("₿ پرداخت با ارز دیجیتال (به‌زودی)", callback_data="soon"))
+    kb.add(InlineKeyboardButton("🅿️ پرداخت با PayPal (به‌زودی)", callback_data="soon"))
+    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"prod:{s['device_key']}"))
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
+    except Exception:
+        pass
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "soon")
+def pay_soon(call):
+    bot.answer_callback_query(call.id, "🚧 این روش پرداخت به‌زودی فعاله!", show_alert=True)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("card_sub:"))
+def card_sub(call):
+    sid = int(call.data.split(":", 1)[1])
+    s = get_sub_product(sid)
+    if not s or not s["available"]:
+        return bot.answer_callback_query(call.id, "❌ ناموجود!", show_alert=True)
+    device = get_product(s["device_key"])
+    dname = device["name"] if device else ""
+    full_name = f"{dname} — {s['name']}"
+    price_txt = s["price"] if s["price"] and s["price"] != "-" else "توافقی — به پشتیبانی پیام بده"
+    txt = f"""🧾 فاکتور سفارش
+━━━━━━━━━━
+📦 محصول: {full_name}
+💰 مبلغ: {price_txt}
+━━━━━━━━━━
+💳 شماره کارت:
+{config.CARD_NUMBER}
+👤 به نام: {config.CARD_OWNER}
+━━━━━━━━━━
+✅ بعد از واریز، دکمه زیر رو بزن و فیش رو بفرست"""
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✅ واریز کردم — ارسال فیش", callback_data=f"receipt_sub:{sid}"))
+    kb.add(InlineKeyboardButton("🔙 بازگشت به روش پرداخت", callback_data=f"pay_sub:{sid}"))
+    try:
+        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
+    except Exception:
+        pass
+    bot.answer_callback_query(call.id)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("receipt_sub:"))
+def receipt_sub_start(call):
+    sid = int(call.data.split(":", 1)[1])
+    s = get_sub_product(sid)
+    if not s:
+        return bot.answer_callback_query(call.id, "⚠️ این محصول حذف شده!")
+    bot.answer_callback_query(call.id)
+    if s["min_qty"] and s["min_qty"] != "-":
+        msg = bot.send_message(call.message.chat.id,
+            f"🔢 چند تا می‌خوای؟\n\n"
+            f"❗️ حداقل: {s['min_qty']}\n"
+            f"❗️ حداکثر: {s['max_qty']}\n\n"
+            "عدد رو بنویس:")
+        bot.register_next_step_handler(msg, sub_ask_qty, sid, {})
+        return
+    msg = bot.send_message(call.message.chat.id,
+        "📝 نام و نام خانوادگی خودت رو بفرست:\n\n❌ برای لغو، یه دکمه منو بزن یا /cancel")
+    bot.register_next_step_handler(msg, form_sub_name, sid, {})
+
+def sub_ask_qty(message, sid, data):
+    s = get_sub_product(sid)
+    if is_cancel(message): return cancel_action(message)
+    if not s:
+        return bot.send_message(message.chat.id, "⚠️ این محصول حذف شده!", reply_markup=main_kb)
+    if not message.text or not message.text.strip().isdigit():
+        msg = bot.send_message(message.chat.id, "⚠️ فقط عدد بفرست (مثلا: 250):\n\n🔢 چند تا می‌خوای؟")
+        bot.register_next_step_handler(msg, sub_ask_qty, sid, data)
+        return
+    qty = int(message.text.strip())
+    mn, mx = s["min_qty"], s["max_qty"]
+    try:
+        lo = int(mn) if mn and mn != "-" else 1
+        hi = int(mx) if mx and mx != "-" else 10**9
+    except ValueError:
+        lo, hi = 1, 10**9
+    if qty < lo or qty > hi:
+        msg = bot.send_message(message.chat.id,
+            f"⚠️ تعداد باید بین {lo} تا {hi} باشه!\n\n🔢 دوباره بفرست:")
+        bot.register_next_step_handler(msg, sub_ask_qty, sid, data)
+        return
+    data["qty"] = qty
+    msg = bot.send_message(message.chat.id,
+        "📝 نام و نام خانوادگی خودت رو بفرست:\n\n❌ برای لغو، یه دکمه منو بزن یا /cancel")
+    bot.register_next_step_handler(msg, form_sub_name, sid, data)
+
+def form_sub_name(message, sid, data):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(message.chat.id, "⚠️ لطفاً متنی بفرست:\n\n📝 نام و نام خانوادگی:", form_sub_name, sid, data)
+    data["name"] = message.text
+    msg = bot.send_message(message.chat.id, "📎 مرحله آخر! عکس فیش واریز رو بفرست:")
+    bot.register_next_step_handler(msg, form_sub_receipt, sid, data)
+
+def form_sub_receipt(message, sid, data):
+    if is_cancel(message): return cancel_action(message)
+    if message.content_type != "photo":
+        return reask(message.chat.id, "📎 لطفاً عکس فیش واریز رو بفرست:", form_sub_receipt, sid, data)
+    finish_sub_order(message, sid, data)
+
+def finish_sub_order(message, sid, data):
+    s = get_sub_product(sid)
+    if not s:
+        return bot.send_message(message.chat.id, "⚠️ این محصول حذف شده!", reply_markup=main_kb)
+    device = get_product(s["device_key"])
+    dname = device["name"] if device else ""
+    full_name = f"{dname} — {s['name']}"
+    price = s["price"]
+    details = f"👤 نام و نام خانوادگی: {data['name']}"
+    if "qty" in data:
+        details += f"\n▪️ تعداد: {data['qty']}"
+    oid = add_order(message.from_user.id, full_name, details, price)
+    u = message.from_user
+    uname = f"@{u.username}" if u.username else "ندارد"
+    admin_txt = f"""🛒 سفارش جدید #{oid}
+━━━━━━━━━━
+📦 محصول: {full_name}
+💰 مبلغ: {price if price != '-' else 'توافقی'}
+━━━━━━━━━━
+{details}
+━━━━━━━━━━
+🔗 یوزرنیم: {uname}
+🆔 آیدی مشتری: {u.id}"""
+    try:
+        bot.send_message(config.ADMIN_ID, admin_txt)
+        bot.copy_message(config.ADMIN_ID, message.chat.id, message.message_id, caption="📎 فیش واریز مشتری")
+    except Exception:
+        pass
+    add_points(message.from_user.id, 5)
+    wallet_notify(message.from_user.id)
+    bot.send_message(message.chat.id, f"""✅ سفارش #{oid} ثبت شد!
+━━━━━━━━━━
+📦 محصول: {full_name}
+📍 وضعیت: ⏳ در انتظار بررسی
+💰 ۵ پوینت به کیف پولت اضافه شد!
+
+پشتیبانی بعد از بررسی فیش باهات در تماسه 🤍""", reply_markup=main_kb)
+
+# ==================== فاکتور و فرم سفارش (دستگاه بدون زیرمحصول) ====================
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pay:"))
 def pay_page(call):
@@ -390,7 +653,7 @@ def pay_page(call):
     if not row:
         bot.answer_callback_query(call.id, "⚠️ این محصول حذف شده!")
         return
-    _, name, price, desc, extra, avail = row
+    name, price = row["name"], row["price"]
     price_txt = price if price and price != "-" else "توافقی — به پشتیبانی پیام بده"
     txt = f"""💳 روش پرداخت
 ━━━━━━━━━━
@@ -410,11 +673,6 @@ def pay_page(call):
         pass
     bot.answer_callback_query(call.id)
 
-@bot.callback_query_handler(func=lambda c: c.data == "soon")
-def pay_soon(call):
-    bot.answer_callback_query(call.id, "🚧 این روش پرداخت به‌زودی فعاله!", show_alert=True)
-
-    
 @bot.callback_query_handler(func=lambda c: c.data.startswith("card:"))
 def card_page(call):
     key = call.data.split(":", 1)[1]
@@ -422,7 +680,7 @@ def card_page(call):
     if not row:
         bot.answer_callback_query(call.id, "⚠️ این محصول حذف شده!")
         return
-    _, name, price, desc, extra, avail = row
+    name, price = row["name"], row["price"]
     price_txt = price if price and price != "-" else "توافقی — به پشتیبانی پیام بده"
     txt = f"""🧾 فاکتور سفارش
 ━━━━━━━━━━
@@ -460,9 +718,9 @@ def form_name(message, key, data):
 
 def extra_fields(key):
     row = get_product(key)
-    if not row or not row[4] or row[4] == "-":
+    if not row or not row["extra"] or row["extra"] == "-":
         return []
-    return [f.strip() for f in row[4].split("|") if f.strip()]
+    return [f.strip() for f in row["extra"].split("|") if f.strip()]
 
 def ask_extra(chat_id, key, data, idx):
     fields = extra_fields(key)
@@ -488,7 +746,7 @@ def finish_order(message, key, data):
     row = get_product(key)
     if not row:
         return bot.send_message(message.chat.id, "⚠️ این محصول حذف شده!", reply_markup=main_kb)
-    _, name, price, *_ = row
+    name, price = row["name"], row["price"]
     details = f"👤 نام و نام خانوادگی: {data['name']}"
     for f, v in data.get("extra", {}).items():
         details += f"\n▪️ {f}: {v}"
@@ -509,12 +767,40 @@ def finish_order(message, key, data):
         bot.copy_message(config.ADMIN_ID, message.chat.id, message.message_id, caption="📎 فیش واریز مشتری")
     except Exception:
         pass
+    add_points(message.from_user.id, 5)
+    wallet_notify(message.from_user.id)
     bot.send_message(message.chat.id, f"""✅ سفارش #{oid} ثبت شد!
 ━━━━━━━━━━
 📦 محصول: {name}
 📍 وضعیت: ⏳ در انتظار بررسی
+💰 ۵ پوینت به کیف پولت اضافه شد!
 
 پشتیبانی بعد از بررسی فیش باهات در تماسه 🤍""", reply_markup=main_kb)
+
+# ==================== کیف پول ====================
+
+@bot.message_handler(func=lambda m: m.text == btn8)
+@membership_required
+def wallet_handler(message):
+    uid = message.from_user.id
+    pts = get_points(uid)
+    orders_cnt = count("SELECT COUNT(*) FROM orders WHERE user_id=?", uid)
+    invites = count("SELECT COUNT(*) FROM users WHERE referrer_id=?", uid)
+    if pts >= 50:
+        goal_txt = "🎉 به ۵۰ پوینت رسیدی! پشتیبانی به‌زودی باهات در تماسه 🤍"
+    else:
+        goal_txt = f"🎯 {50 - pts} پوینت تا جایزه‌ی ۵۰ تایی مونده!"
+    txt = f"""💰 کیف پول تو
+━━━━━━━━━━
+💎 پوینت فعلی: {pts}
+━━━━━━━━━━
+🛒 هر سفارش ثبت‌شده = ۵ پوینت
+👥 هر دعوت موفق = ۱۰ پوینت
+━━━━━━━━━━
+📊 سفارش‌ها: {orders_cnt} | دعوت‌ها: {invites}
+━━━━━━━━━━
+{goal_txt}"""
+    bot.send_message(message.chat.id, txt, reply_markup=main_kb)
 
 # ==================== سفارش‌های من ====================
 
@@ -552,7 +838,7 @@ def faq_show(call):
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🔙 بازگشت به سوالات", callback_data="faqlist"))
     try:
-        bot.edit_message_text(f"❓ سوال:\n{row[0]}\n\n━━━━━━━━━━\n\n💬 جواب:\n{row[1]}",
+        bot.edit_message_text(f"❓ سوال:\n{row['question']}\n\n━━━━━━━━━━\n\n💬 جواب:\n{row['answer']}",
                               call.message.chat.id, call.message.message_id, reply_markup=kb)
     except Exception:
         pass
@@ -590,6 +876,7 @@ def ref_stats(call):
     txt = f"""📊 آمار دعوت‌های تو
 ━━━━━━━━━━
 👥 تعداد دعوت‌شدگان: {len(rows)} نفر
+💎 پوینت دعوت: {len(rows) * 10}
 ━━━━━━━━━━
 {names}"""
     kb = InlineKeyboardMarkup()
@@ -609,7 +896,7 @@ def ref_link(call):
 
 ━━━━━━━━━━
 📤 این لینک رو برای دوستات بفرست!
-هرکس با لینک تو استارت بزنه، دعوت‌شده‌ی تو حساب می‌شه 🎯"""
+هرکس با لینک تو استارت بزنه، 💰 ۱۰ پوینت می‌گیری 🎯"""
     kb = InlineKeyboardMarkup()
     kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data="refback"))
     try:
@@ -643,16 +930,19 @@ def support_handler(message):
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sup:"))
 def support_actions(call):
     act = call.data.split(":")[1]
-    kb = InlineKeyboardMarkup()
     if act == "chat":
         SUPPORT_MODE.add(call.message.chat.id)
-        bot.edit_message_text("""✉️ گفتگو با پشتیبانی
+        try:
+            bot.edit_message_text("""✉️ گفتگو با پشتیبانی
 ━━━━━━━━━━
 هر متنی یا عکسی بفرستی، مستقیم می‌ره به پشتیبانی 💌
 برای خروج، دکمه «🔙 خروج از پشتیبانی» رو بزن.""",
-            call.message.chat.id, call.message.message_id)
+                call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
         bot.send_message(call.message.chat.id, "💬 حالا پیامت رو بنویس:", reply_markup=support_kb)
     else:
+        kb = InlineKeyboardMarkup()
         kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data="supback"))
         txt = f"""👤 ارتباط با ادمین
 ━━━━━━━━━━
@@ -704,7 +994,8 @@ def admin_kb():
            InlineKeyboardButton("❓ سوالات متداول", callback_data="adm:faq"))
     kb.add(InlineKeyboardButton("🛍 مدیریت محصولات", callback_data="adm:products"),
            InlineKeyboardButton("💬 مکالمات", callback_data="adm:support"))
-    kb.add(InlineKeyboardButton("🏠 منوی اصلی", callback_data="adm:menu"))
+    kb.add(InlineKeyboardButton("💰 کیف پول‌ها", callback_data="adm:wallets"),
+           InlineKeyboardButton("🏠 منوی اصلی", callback_data="adm:menu"))
     return kb
 
 @bot.message_handler(func=lambda m: m.text == btn5)
@@ -717,7 +1008,7 @@ def admin_panel(message):
 def admin_actions(call):
     if call.from_user.id != config.ADMIN_ID:
         return bot.answer_callback_query(call.id, "⛔️ دسترسی نداری!", show_alert=True)
-    act = call.data.split(":")[1]
+    act = call.data.split(":", 1)[1]
     chat, mid = call.message.chat.id, call.message.message_id
     bot.answer_callback_query(call.id)
 
@@ -738,8 +1029,9 @@ def admin_actions(call):
         return try_edit(chat, mid, txt, kb)
 
     if act == "orders":
-        rows = None
-        con = db(); rows = con.execute("SELECT order_id, product_name, status FROM orders ORDER BY order_id DESC LIMIT 10").fetchall(); con.close()
+        con = db()
+        rows = con.execute("SELECT order_id, product_name, status FROM orders ORDER BY order_id DESC LIMIT 10").fetchall()
+        con.close()
         kb = InlineKeyboardMarkup(row_width=1)
         if rows:
             kb.add(*[InlineKeyboardButton(f"{status.split()[0]} #{oid} — {pname[:25]}",
@@ -748,6 +1040,22 @@ def admin_actions(call):
             kb.add(InlineKeyboardButton("هنوز سفارشی نیست 🍃", callback_data="noop"))
         kb.add(InlineKeyboardButton("🔙 پنل", callback_data="admback"))
         return try_edit(chat, mid, "📦 ۱۰ سفارش اخیر:\nروی سفارش بزن تا جزئیات و تایید/رد ببینی 👇", kb)
+
+    if act == "wallets":
+        con = db()
+        rows = con.execute("""SELECT name, username, user_id, points FROM users
+                              WHERE points >= 50 ORDER BY points DESC LIMIT 30""").fetchall()
+        con.close()
+        if rows:
+            lines = "\n".join(
+                f"💎 {r['points']} پوینت — {r['name']} ({r['username'] or 'بدون یوزرنیم'})\n🆔 {r['user_id']}"
+                for r in rows)
+            txt = f"💰 کاربران با ۵۰ پوینت یا بیشتر:\n\n{lines}"
+        else:
+            txt = "هنوز کسی به ۵۰ پوینت نرسیده 🍃"
+        kb = InlineKeyboardMarkup()
+        kb.add(InlineKeyboardButton("🔙 پنل", callback_data="admback"))
+        return try_edit(chat, mid, txt, kb)
 
     if act == "broadcast":
         msg = bot.send_message(chat, "📢 متن پیام همگانی رو بفرست:\n(برای لغو /cancel)")
@@ -783,6 +1091,24 @@ def adm_back(call):
 def noop(call):
     bot.answer_callback_query(call.id)
 
+@bot.callback_query_handler(func=lambda c: c.data.startswith("supchat:"))
+def admin_supchat(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    uid = int(call.data.split(":", 1)[1])
+    bot.answer_callback_query(call.id)
+    con = db()
+    u = con.execute("SELECT name, username FROM users WHERE user_id=?", (uid,)).fetchone()
+    con.close()
+    name = u["name"] if u else "؟"
+    uname = u["username"] if u else None
+    txt = f"""👤 مکالمه با {name}
+🔗 یوزرنیم: {uname or 'ندارد'}
+🆔 آیدی: {uid}"""
+    kb = InlineKeyboardMarkup()
+    kb.add(InlineKeyboardButton("✍️ پاسخ", callback_data=f"reply:{uid}"))
+    kb.add(InlineKeyboardButton("🔙 مکالمات", callback_data="adm:support"))
+    try_edit(call.message.chat.id, call.message.message_id, txt, kb)
+
 def try_edit(chat, mid, txt, kb):
     try:
         bot.edit_message_text(txt, chat, mid, reply_markup=kb)
@@ -802,9 +1128,12 @@ def order_detail_view(chat, mid, oid):
     row = get_order(oid)
     if not row:
         return try_edit(chat, mid, "⚠️ سفارش پیدا نشد!", None)
-    _, uid, pname, details, price, status, created = row
-    con = db(); u = con.execute("SELECT name, username FROM users WHERE user_id=?", (uid,)).fetchone(); con.close()
-    uname = u[1] if u and u[1] else "ندارد"
+    uid, pname, details, price, status, created = (row["user_id"], row["product_name"],
+        row["details"], row["price"], row["status"], row["created_at"])
+    con = db()
+    u = con.execute("SELECT name, username FROM users WHERE user_id=?", (uid,)).fetchone()
+    con.close()
+    uname = u["username"] if u and u["username"] else "ندارد"
     txt = f"""🧾 سفارش #{oid}
 ━━━━━━━━━━
 📦 محصول: {pname}
@@ -814,7 +1143,7 @@ def order_detail_view(chat, mid, oid):
 ━━━━━━━━━━
 {details}
 ━━━━━━━━━━
-👤 مشتری: {u[0] if u else '؟'}
+👤 مشتری: {u['name'] if u else '؟'}
 🔗 یوزرنیم: {uname}
 🆔 آیدی: {uid}"""
     kb = InlineKeyboardMarkup()
@@ -833,8 +1162,8 @@ def order_status_change(call):
     update_order_status(oid, new_status)
     row = get_order(oid)
     try:
-        bot.send_message(row[1], f"""📢 وضعیت سفارش #{oid} تغییر کرد!
-📦 محصول: {row[2]}
+        bot.send_message(row["user_id"], f"""📢 وضعیت سفارش #{oid} تغییر کرد!
+📦 محصول: {row['product_name']}
 📍 وضعیت جدید: {new_status}""")
     except Exception:
         pass
@@ -896,7 +1225,7 @@ def admin_faq_show(call):
     kb.add(InlineKeyboardButton("🗑 حذف", callback_data=f"delfaq:{fid}"))
     kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data="adm:faq"))
     try_edit(call.message.chat.id, call.message.message_id,
-             f"❓ سوال:\n{row[0]}\n\n💬 جواب:\n{row[1]}", kb)
+             f"❓ سوال:\n{row['question']}\n\n💬 جواب:\n{row['answer']}", kb)
     bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("delfaq:"))
@@ -927,7 +1256,7 @@ def faq_a(message, q):
     save_faq(q, message.text)
     bot.send_message(config.ADMIN_ID, "✅ سوال و جواب ذخیره شد!", reply_markup=admin_kb())
 
-# ---------- مدیریت محصولات (ادمین) ----------
+# ---------- مدیریت محصولات اصلی (ادمین) ----------
 
 def admin_products_list(call):
     chat, mid = call.message.chat.id, call.message.message_id
@@ -947,12 +1276,13 @@ def admin_product_show(call):
     row = get_product(key)
     if not row:
         bot.answer_callback_query(call.id, "⚠️ حذف شده!"); return
-    _, name, price, desc, extra, avail = row
+    name, price, desc, extra, avail = (row["name"], row["price"], row["description"], row["extra"], row["available"])
+    extra_txt = extra.replace('|', '، ') if extra and extra != '-' else '—'
     txt = f"""🛍 {name}
 ━━━━━━━━━━
 💰 قیمت: {price}
 📝 توضیحات: {desc if desc != '-' else '—'}
-📋 موارد موردنیاز: {extra.replace('|', '، ') if extra != '-' else '—'}
+📋 موارد موردنیاز: {extra_txt}
 📍 وضعیت: {'✅ موجود' if avail else '❌ ناموجود'}"""
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(InlineKeyboardButton("🔄 موجود / ناموجود", callback_data=f"ptoggle:{key}"))
@@ -997,11 +1327,11 @@ def p_add(call):
     if call.from_user.id != config.ADMIN_ID: return
     bot.answer_callback_query(call.id)
     txt = (
-        "🛍 <b>افزودن محصول</b>\n"
+        "🛍 افزودن محصول (دستگاه)\n"
         "━━━━━━━━━━\n"
         "📌 از لیست زیر خدمت مورد نظر رو انتخاب کن:\n\n"
-        "✨ اسم و فرم سفارش هر خدمت خودکار آماده می‌شه —\n"
-        "فقط قیمتشو مشخص می‌کنی!"
+        "✨ بعد از ساخت، از صفحه‌ی مدیریت محصول، دکمه «🧩 محصولات» رو بزن\n"
+        "و محصولاتی که کاربر می‌بینه رو اضافه کن!"
     )
     kb = InlineKeyboardMarkup(row_width=1)
     for key, name, price, desc, extra in DEFAULT_PRODUCTS:
@@ -1009,56 +1339,6 @@ def p_add(call):
     kb.add(InlineKeyboardButton("✏️ محصول کاملاً جدید (خارج از لیست)", callback_data="addnew"))
     kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data="adm:products"))
     try_edit(call.message.chat.id, call.message.message_id, txt, kb)
-
-
-@bot.callback_query_handler(func=lambda c: c.data == "addnew")
-def p_add_new(call):
-    if call.from_user.id != config.ADMIN_ID: return
-    bot.answer_callback_query(call.id)
-    msg = bot.send_message(config.ADMIN_ID, "🛍 (۱) نام محصول رو بفرست:")
-    bot.register_next_step_handler(msg, p_add_name)
-
-
-def p_tpl_price(message, key, name, extra):
-    if is_cancel(message): return cancel_action(message)
-    if not message.text:
-        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n💰 قیمت:", p_tpl_price, key, name, extra)
-    save_product(key, name, message.text, "-", extra)
-    bot.send_message(config.ADMIN_ID,
-        f"✅ «{name}» با قیمت «{message.text}» ثبت شد!\n"
-        "الان تو لیست محصولات کاربرا هست 🛍",
-        reply_markup=admin_kb())
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("sub:"))
-def sub_product_view(call):
-    sid = int(call.data.split(":", 1)[1])
-    s = get_sub_product(sid)
-    if not s:
-        bot.answer_callback_query(call.id, "⚠️ این محصول حذف شده!")
-        return
-    device = get_product(s["device_key"])
-    dname = device[1] if device else ""
-    if not s["available"]:
-        bot.answer_callback_query(call.id, "❌ این محصول فعلاً ناموجوده!", show_alert=True)
-        return
-    has_limit = s["min_qty"] and s["min_qty"] != "-"
-    txt = (
-        f"{dname}\n"
-        f"🛍 محصول: {s['name']}\n"
-        "━━━━━━━━━━\n"
-        f"💰 قیمت: {s['price']}\n"
-        + (f"🔢 حداقل: {s['min_qty']} | حداکثر: {s['max_qty']}\n" if has_limit else "")
-        + "━━━━━━━━━━\n"
-        "آماده‌ی خریدی؟ 👇"
-    )
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("🛒 ثبت سفارش و پرداخت", callback_data=f"pay_sub:{sid}"))
-    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"prod:{s['device_key']}"))
-    try:
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
-    except Exception:
-        pass
-    bot.answer_callback_query(call.id)
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("addtpl:"))
 def p_add_template(call):
@@ -1071,7 +1351,7 @@ def p_add_template(call):
     bot.answer_callback_query(call.id)
     _, name, price, desc, extra = tpl
     fields = [f.strip() for f in extra.split("|") if f.strip()] if extra and extra != "-" else []
-    fields_txt = "\n".join(f"  ▪️ {f}" for f in fields) if fields else "  ▪️ (بدون فرم — مستقیم فیش)"
+    fields_txt = "\n".join(f"  ▪️ {f}" for f in fields) if fields else "  ▪️ (بدون فرم)"
     msg = bot.send_message(config.ADMIN_ID,
         f"💰 قیمت «{name}» رو بفرست:\n\n"
         "━━━━━━━━━━\n"
@@ -1080,145 +1360,23 @@ def p_add_template(call):
         "✍️ قیمت رو بنویس (برای توافقی «-»):")
     bot.register_next_step_handler(msg, p_tpl_price, key, name, extra)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("pay_sub:"))
-def pay_sub(call):
-    sid = int(call.data.split(":", 1)[1])
-    s = get_sub_product(sid)
-    if not s or not s["available"]:
-        return bot.answer_callback_query(call.id, "❌ ناموجود!", show_alert=True)
-    # صفحه روش پرداخت با نام کامل دستگاه + محصول
-    device = get_product(s["device_key"])
-    dname = device[1] if device else ""
-    full_name = f"{dname} — {s['name']}"
-    price_txt = s["price"] if s["price"] and s["price"] != "-" else "توافقی — به پشتیبانی پیام بده"
-    txt = f"""💳 روش پرداخت
-━━━━━━━━━━
-📦 محصول: {full_name}
-💰 مبلغ: {price_txt}
-━━━━━━━━━━
-روش پرداخت رو انتخاب کن 👇"""
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("💳 پرداخت کارت به کارت", callback_data=f"card_sub:{sid}"))
-    kb.add(InlineKeyboardButton("🏦 پرداخت از درگاه (به‌زودی)", callback_data="soon"))
-    kb.add(InlineKeyboardButton("₿ پرداخت با ارز دیجیتال (به‌زودی)", callback_data="soon"))
-    kb.add(InlineKeyboardButton("🅿️ پرداخت با PayPal (به‌زودی)", callback_data="soon"))
-    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"prod:{s['device_key']}"))
-    try:
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
-    except Exception:
-        pass
-    bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("card_sub:"))
-def card_sub(call):
-    sid = int(call.data.split(":", 1)[1])
-    s = get_sub_product(sid)
-    if not s or not s["available"]:
-        return bot.answer_callback_query(call.id, "❌ ناموجود!", show_alert=True)
-    device = get_product(s["device_key"])
-    dname = device[1] if device else ""
-    full_name = f"{dname} — {s['name']}"
-    price_txt = s["price"] if s["price"] and s["price"] != "-" else "توافقی — به پشتیبانی پیام بده"
-    txt = f"""🧾 فاکتور سفارش
-━━━━━━━━━━
-📦 محصول: {full_name}
-💰 مبلغ: {price_txt}
-━━━━━━━━━━
-💳 شماره کارت:
-{config.CARD_NUMBER}
-👤 به نام: {config.CARD_OWNER}
-━━━━━━━━━━
-✅ بعد از واریز، دکمه زیر رو بزن و فیش رو بفرست"""
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("✅ واریز کردم — ارسال فیش", callback_data=f"receipt_sub:{sid}"))
-    kb.add(InlineKeyboardButton("🔙 بازگشت به روش پرداخت", callback_data=f"pay_sub:{sid}"))
-    try:
-        bot.edit_message_text(txt, call.message.chat.id, call.message.message_id, reply_markup=kb)
-    except Exception:
-        pass
-    bot.answer_callback_query(call.id)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("receipt_sub:"))
-def receipt_sub_start(call):
-    sid = int(call.data.split(":", 1)[1])
-    s = get_sub_product(sid)
-    bot.answer_callback_query(call.id)
-    if s and s["min_qty"] and s["min_qty"] != "-":
-        msg = bot.send_message(call.message.chat.id,
-            f"🔢 چند تا می‌خوای؟\n\n"
-            f"❗️ حداقل: {s['min_qty']}\n"
-            f"❗️ حداکثر: {s['max_qty']}\n\n"
-            "عدد رو بنویس:")
-        bot.register_next_step_handler(msg, sub_ask_qty, sid, {})
-        return
-    msg = bot.send_message(call.message.chat.id,
-        "📝 نام و نام خانوادگی خودت رو بفرست:\n\n❌ برای لغو، یه دکمه منو بزن یا /cancel")
-    bot.register_next_step_handler(msg, form_sub_name, sid, {})
-
-def sub_ask_qty(message, sid, data):
-    s = get_sub_product(sid)
-    if is_cancel(message): return cancel_action(message)
-    if not message.text or not message.text.strip().isdigit():
-        msg = bot.send_message(message.chat.id, "⚠️ فقط عدد بفرست (مثلا: 250):\n\n🔢 چند تا می‌خوای؟")
-        bot.register_next_step_handler(msg, sub_ask_qty, sid, data)
-        return
-    qty = int(message.text.strip())
-    if int(s["min_qty"]) > qty or qty > int(s["max_qty"]):
-        msg = bot.send_message(message.chat.id,
-            f"⚠️ تعداد باید بین {s['min_qty']} تا {s['max_qty']} باشه!\n\n🔢 دوباره بفرست:")
-        bot.register_next_step_handler(msg, sub_ask_qty, sid, data)
-        return
-    data["qty"] = qty
-    msg = bot.send_message(message.chat.id,
-        "📝 نام و نام خانوادگی خودت رو بفرست:\n\n❌ برای لغو، یه دکمه منو بزن یا /cancel")
-    bot.register_next_step_handler(msg, form_sub_name, sid, data)
-
-def form_sub_name(message, sid, data):
+def p_tpl_price(message, key, name, extra):
     if is_cancel(message): return cancel_action(message)
     if not message.text:
-        return reask(message.chat.id, "⚠️ لطفاً متنی بفرست:\n\n📝 نام و نام خانوادگی:", form_sub_name, sid, data)
-    data["name"] = message.text
-    msg = bot.send_message(message.chat.id, "📎 مرحله آخر! عکس فیش واریز رو بفرست:")
-    bot.register_next_step_handler(msg, form_sub_receipt, sid, data)
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n💰 قیمت:", p_tpl_price, key, name, extra)
+    save_product(key, name, message.text, "-", extra)
+    bot.send_message(config.ADMIN_ID,
+        f"✅ «{name}» ساخته شد!\n\n"
+        "🧩 حالا از صفحه‌ی مدیریت محصول، دکمه «🧩 محصولات» رو بزن "
+        "و محصولاتی که کاربر می‌بینه رو بهش اضافه کن.",
+        reply_markup=admin_kb())
 
-def form_sub_receipt(message, sid, data):
-    if is_cancel(message): return cancel_action(message)
-    if message.content_type != "photo":
-        return reask(message.chat.id, "📎 لطفاً عکس فیش واریز رو بفرست:", form_sub_receipt, sid, data)
-    finish_sub_order(message, sid, data)
-
-def finish_sub_order(message, sid, data):
-    s = get_sub_product(sid)
-    if not s:
-        return bot.send_message(message.chat.id, "⚠️ این محصول حذف شده!", reply_markup=main_kb)
-    device = get_product(s["device_key"])
-    dname = device[1] if device else ""
-    full_name = f"{dname} — {s['name']}"
-    qty_line = f"\n🔢 تعداد: {data['qty']}" if "qty" in data else ""
-    details = f"👤 نام و نام خانوادگی: {data['name']}{qty_line}"
-    oid = add_order(message.from_user.id, full_name, details, s["price"])
-    u = message.from_user
-    uname = f"@{u.username}" if u.username else "ندارد"
-    admin_txt = f"""🛒 سفارش جدید #{oid}
-━━━━━━━━━━
-📦 محصول: {full_name}
-💰 مبلغ: {s['price']}
-━━━━━━━━━━
-{details}
-━━━━━━━━━━
-🔗 یوزرنیم: {uname}
-🆔 آیدی مشتری: {u.id}"""
-    try:
-        bot.send_message(config.ADMIN_ID, admin_txt)
-        bot.copy_message(config.ADMIN_ID, message.chat.id, message.message_id, caption="📎 فیش واریز مشتری")
-    except Exception:
-        pass
-    bot.send_message(message.chat.id, f"""✅ سفارش #{oid} ثبت شد!
-━━━━━━━━━━
-📦 محصول: {full_name}
-📍 وضعیت: ⏳ در انتظار بررسی
-
-پشتیبانی بعد از بررسی فیش باهات در تماسه 🤍""", reply_markup=main_kb)
+@bot.callback_query_handler(func=lambda c: c.data == "addnew")
+def p_add_new(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(config.ADMIN_ID, "🛍 (۱) نام محصول رو بفرست:")
+    bot.register_next_step_handler(msg, p_add_name)
 
 def p_add_name(message):
     if is_cancel(message): return cancel_action(message)
@@ -1231,256 +1389,164 @@ def p_add_price(message, name):
     if is_cancel(message): return cancel_action(message)
     if not message.text:
         return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n💰 (۲) قیمت:", p_add_price, name)
-    msg = bot.send_message(config.ADMIN_ID, "📝 (۳) توضیحات رو بفرست (اگه نداره «-»):")
-    bot.register_next_step_handler(msg, p_add_desc, name, message.text)
+    key = "c" + str(int(time.time()))
+    save_product(key, name, message.text, "-", "-")
+    bot.send_message(config.ADMIN_ID,
+        f"✅ «{name}» ساخته شد!\n\n"
+        "🧩 حالا از صفحه‌ی مدیریت محصول، دکمه «🧩 محصولات» رو بزن "
+        "و محصولاتی که کاربر می‌بینه رو بهش اضافه کن.",
+        reply_markup=admin_kb())
 
-def p_add_desc(message, name, price):
-    if is_cancel(message): return cancel_action(message)
-    if not message.text:
-        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n📝 (۳) توضیحات:", p_add_desc, name, price)
-    msg = bot.send_message(config.ADMIN_ID,
-        "📋 (۴) اطلاعات موردنیاز از مشتری رو با «|» جدا بفرست (اگه نداره «-»):\nمثال: تعداد استارز|یوزرنیم چنل")
-    bot.register_next_step_handler(msg, p_add_extra, name, price, message.text)
-
-def p_add_extra(message, name, price, desc):
-    if is_cancel(message): return cancel_action(message)
-    if not message.text:
-        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:", p_add_extra, name, price, desc)
-    key = f"c{int(time.time())}"
-    save_product(key, name, price, desc, message.text)
-    bot.send_message(config.ADMIN_ID, f"✅ محصول «{name}» اضافه شد!", reply_markup=admin_kb())
-
-
-# ---------- محصولات هر دستگاه ----------
+# ---------- مدیریت زیرمحصولات هر دستگاه (ادمین) ----------
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("subs:"))
-def subs_list(call):
+def admin_subs_list(call):
     if call.from_user.id != config.ADMIN_ID: return
     key = call.data.split(":", 1)[1]
+    bot.answer_callback_query(call.id)
+    admin_subs_view(call.message.chat.id, call.message.message_id, key)
+
+def admin_subs_view(chat, mid, key):
     row = get_product(key)
-    name = row[1] if row else "؟"
+    if not row:
+        return try_edit(chat, mid, "⚠️ این دستگاه حذف شده!", None)
     subs = all_sub_products(key)
-    kb = InlineKeyboardMarkup()
+    kb = InlineKeyboardMarkup(row_width=1)
     if subs:
         for s in subs:
             badge = "✅" if s["available"] else "❌"
-            kb.add(InlineKeyboardButton(
-                f"{badge} {s['name']} — {s['price']}",
-                callback_data=f"subview:{s['id']}"))
+            kb.add(InlineKeyboardButton(f"{badge} {s['name']} — {s['price']}", callback_data=f"sshow:{s['id']}"))
     else:
         kb.add(InlineKeyboardButton("هنوز محصولی نیست 🍃", callback_data="noop"))
-    kb.add(InlineKeyboardButton("➕ افزودن محصول به این دستگاه", callback_data=f"subadd:{key}"))
+    kb.add(InlineKeyboardButton("➕ افزودن محصول به این دستگاه", callback_data=f"addsub:{key}"))
     kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"admp:{key}"))
-    try_edit(call.message.chat.id, call.message.message_id,
-             f"🧩 محصولات «{name}»:\n(✅ موجود | ❌ ناموجود)", kb)
-    bot.answer_callback_query(call.id)
+    try_edit(chat, mid, f"🧩 محصولات «{row['name']}»:", kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("subtoggle:"))
-def sub_toggle(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sshow:"))
+def admin_sub_show(call):
     if call.from_user.id != config.ADMIN_ID: return
     sid = int(call.data.split(":", 1)[1])
-    toggle_sub_product(sid)
-    bot.answer_callback_query(call.id, "تغییر کرد 🔄")
-    s = get_sub_product(sid)
-    if s:
-        key = s["device_key"]
-        row = get_product(key)
-        name = row[1] if row else "؟"
-        subs = all_sub_products(key)
-        kb = InlineKeyboardMarkup()
-        for x in subs:
-            badge = "✅" if x["available"] else "❌"
-            kb.add(InlineKeyboardButton(f"{badge} {x['name']} — {x['price']}",
-                                        callback_data=f"subview:{x['id']}"))
-        kb.add(InlineKeyboardButton("➕ افزودن محصول به این دستگاه", callback_data=f"subadd:{key}"))
-        kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"admp:{key}"))
-        try_edit(call.message.chat.id, call.message.message_id,
-                 f"🧩 محصولات «{name}»:", kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("subdel:"))
-def sub_del(call):
-    if call.from_user.id != config.ADMIN_ID: return
-    sid = int(call.data.split(":", 1)[1])
-    s = get_sub_product(sid)
-    delete_sub_product(sid)
-    bot.answer_callback_query(call.id, "حذف شد 🗑")
-    if s:
-        key = s["device_key"]
-        row = get_product(key)
-        name = row[1] if row else "؟"
-        subs = all_sub_products(key)
-        kb = InlineKeyboardMarkup()
-        for x in subs:
-            badge = "✅" if x["available"] else "❌"
-            kb.add(InlineKeyboardButton(f"{badge} {x['name']} — {x['price']}",
-                                        callback_data=f"subview:{x['id']}"))
-        kb.add(InlineKeyboardButton("➕ افزودن محصول به این دستگاه", callback_data=f"subadd:{key}"))
-        kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"admp:{key}"))
-        try_edit(call.message.chat.id, call.message.message_id,
-                 f"🧩 محصولات «{name}»:", kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("subadd:"))
-def sub_add(call):
-    if call.from_user.id != config.ADMIN_ID: return
-    key = call.data.split(":", 1)[1]
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(config.ADMIN_ID,
-        "🛍 (۱/۳) اسم محصول رو بفرست (مثلا: استارز):")
-    bot.register_next_step_handler(msg, sub_add_name, key)
+    admin_sub_show_view(call.message.chat.id, call.message.message_id, sid)
 
-def sub_add_name(message, key):
-    if is_cancel(message): return cancel_action(message)
-    if not message.text:
-        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n🛍 (۱/۳) اسم محصول:", sub_add_name, key)
-    msg = bot.send_message(config.ADMIN_ID,
-        "💰 (۲/۳) قیمتش رو بفرست (مثلا: دونه‌ای ۴,۵۰۰ تومان):\n(برای توافقی «-»)")
-    bot.register_next_step_handler(msg, sub_add_price, key, message.text)
-
-def sub_add_price(message, key, name):
-    if is_cancel(message): return cancel_action(message)
-    if not message.text:
-        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n💰 (۲/۳) قیمت:", sub_add_price, key, name)
-    msg = bot.send_message(config.ADMIN_ID,
-        "🔢 (۳/۳) حداقل و حداکثر تعداد خرید رو بفرست (با «|» جدا):\n\n"
-        "مثال: 50|10000\n"
-        "یعنی کاربر بین ۵۰ تا ۱۰۰۰۰ می‌تونه بخره\n\n"
-        "(اگه محدودیت نداره بفرست: -)")
-    bot.register_next_step_handler(msg, sub_add_limits, key, name, message.text)
-
-def sub_add_limits(message, key, name, price):
-    if is_cancel(message): return cancel_action(message)
-    if not message.text:
-        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n🔢 (۳/۳) حداقل|حداکثر:", sub_add_limits, key, name, price)
-    limits = message.text.strip()
-    if limits != "-":
-        parts = limits.split("|")
-        if len(parts) != 2 or not parts[0].strip().isdigit() or not parts[1].strip().isdigit():
-            msg = bot.send_message(config.ADMIN_ID,
-                "⚠️ فرمت اشتباه! مثال درست:\n50|10000\n\n(یا «-» برای بدون محدودیت)")
-            bot.register_next_step_handler(msg, sub_add_limits, key, name, price)
-            return
-        min_q, max_q = parts[0].strip(), parts[1].strip()
-        if int(min_q) > int(max_q):
-            msg = bot.send_message(config.ADMIN_ID,
-                "⚠️ حداقل نمی‌تونه بیشتر از حداکثر باشه!\nدوباره بفرست (مثال: 50|10000 یا «-»):")
-            bot.register_next_step_handler(msg, sub_add_limits, key, name, price)
-            return
-    else:
-        min_q, max_q = "-", "-"
-    save_sub_product(key, name, price, min_q, max_q)
-    limits_txt = f"❗️ حداقل: {min_q} | حداکثر: {max_q}" if min_q != "-" else "بدون محدودیت ✅"
-    bot.send_message(config.ADMIN_ID,
-        f"✅ «{name}» اضافه شد!\n\n💰 {price}\n🔢 {limits_txt}",
-        reply_markup=admin_kb())
-# ---------- مکالمات (ادمین) ----------
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("supchat:"))
-def supchat_show(call):
-    if call.from_user.id != config.ADMIN_ID: return
-    uid = int(call.data.split(":")[1])
-    rows = recent_supports()
-    info = next((r for r in rows if r[0] == uid), None)
-    name = info[1] if info else "؟"
-    uname = info[2] if info else "ندارد"
-    kb = InlineKeyboardMarkup()
-    kb.add(InlineKeyboardButton("✍️ پاسخ", callback_data=f"reply:{uid}"))
-    kb.add(InlineKeyboardButton("🔙 مکالمات", callback_data="adm:support"))
-    try_edit(call.message.chat.id, call.message.message_id,
-             f"👤 مکالمه با: {name}\n🔗 یوزرنیم: {uname}\n🆔 آیدی: {uid}\n\n"
-             "آخرین پیامش بالای همین پیامه 👆 با دکمه «پاسخ» جوابش رو بده:", kb)
-    bot.answer_callback_query(call.id)
-
-# ---------- محصولات هر دستگاه (ادمین) ----------
-
-def subs_render(chat, mid, key):
-    row = get_product(key)
-    name = row[1] if row else "؟"
-    subs = all_sub_products(key)
-    kb = InlineKeyboardMarkup()
-    if subs:
-        for x in subs:
-            badge = "✅" if x["available"] else "❌"
-            kb.add(InlineKeyboardButton(f"{badge} {x['name']} — {x['price']}",
-                                        callback_data=f"subview:{x['id']}"))
-    else:
-        kb.add(InlineKeyboardButton("هنوز محصولی نیست 🍃", callback_data="noop"))
-    kb.add(InlineKeyboardButton("➕ افزودن محصول به این دستگاه", callback_data=f"subadd:{key}"))
-    kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"admp:{key}"))
-    try_edit(chat, mid, f"🧩 محصولات «{name}»:\n(✅ موجود | ❌ ناموجود)", kb)
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("subs:"))
-def subs_list(call):
-    if call.from_user.id != config.ADMIN_ID: return
-    bot.answer_callback_query(call.id)
-    subs_render(call.message.chat.id, call.message.message_id, call.data.split(":", 1)[1])
-
-@bot.callback_query_handler(func=lambda c: c.data.startswith("subview:"))
-def sub_view(call):
-    if call.from_user.id != config.ADMIN_ID: return
-    sid = int(call.data.split(":", 1)[1])
+def admin_sub_show_view(chat, mid, sid):
     s = get_sub_product(sid)
     if not s:
-        bot.answer_callback_query(call.id, "⚠️ حذف شده!"); return
-    limits = (f"❗️ حداقل: {s['min_qty']} | حداکثر: {s['max_qty']}"
-              if s["min_qty"] and s["min_qty"] != "-" else "بدون محدودیت")
+        return try_edit(chat, mid, "⚠️ این محصول حذف شده!", None)
+    device = get_product(s["device_key"])
+    dname = device["name"] if device else ""
+    qty_txt = f"{s['min_qty']} تا {s['max_qty']}" if s["min_qty"] and s["min_qty"] != "-" else "بدون محدودیت"
+    txt = f"""🧩 {s['name']}
+━━━━━━━━━━
+🖥 دستگاه: {dname}
+💰 قیمت: {s['price']}
+🔢 محدودیت تعداد: {qty_txt}
+📍 وضعیت: {'✅ موجود' if s['available'] else '❌ ناموجود'}"""
     kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(InlineKeyboardButton("🔄 موجود/ناموجود", callback_data=f"subtoggle:{sid}"))
-    kb.add(InlineKeyboardButton("🗑 حذف", callback_data=f"subdel:{sid}"))
+    kb.add(InlineKeyboardButton("🔄 موجود/ناموجود", callback_data=f"stoggle:{sid}"))
+    kb.add(InlineKeyboardButton("✏️ قیمت", callback_data=f"sprice:{sid}"))
+    kb.add(InlineKeyboardButton("🔢 حداقل/حداکثر", callback_data=f"sqty:{sid}"))
+    kb.add(InlineKeyboardButton("🗑 حذف", callback_data=f"sdel:{sid}"))
     kb.add(InlineKeyboardButton("🔙 بازگشت", callback_data=f"subs:{s['device_key']}"))
-    try_edit(call.message.chat.id, call.message.message_id,
-             f"🧩 {s['name']}\n💰 {s['price']}\n🔢 {limits}\n📍 {'✅ موجود' if s['available'] else '❌ ناموجود'}", kb)
-    bot.answer_callback_query(call.id)
+    try_edit(chat, mid, txt, kb)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("subtoggle:"))
-def sub_toggle(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("stoggle:"))
+def admin_sub_toggle(call):
     if call.from_user.id != config.ADMIN_ID: return
     sid = int(call.data.split(":", 1)[1])
     toggle_sub_product(sid)
     bot.answer_callback_query(call.id, "تغییر کرد 🔄")
-    s = get_sub_product(sid)
-    if s:
-        subs_render(call.message.chat.id, call.message.message_id, s["device_key"])
+    admin_sub_show_view(call.message.chat.id, call.message.message_id, sid)
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("subdel:"))
-def sub_del(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sdel:"))
+def admin_sub_del(call):
     if call.from_user.id != config.ADMIN_ID: return
     sid = int(call.data.split(":", 1)[1])
     s = get_sub_product(sid)
-    delete_sub_product(sid)
-    bot.answer_callback_query(call.id, "حذف شد 🗑")
     if s:
-        subs_render(call.message.chat.id, call.message.message_id, s["device_key"])
+        delete_sub_product(sid)
+        bot.answer_callback_query(call.id, "حذف شد 🗑")
+        admin_subs_view(call.message.chat.id, call.message.message_id, s["device_key"])
+    else:
+        bot.answer_callback_query(call.id, "⚠️ حذف شده!")
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("subadd:"))
-def sub_add(call):
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sprice:"))
+def admin_sub_price(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    sid = int(call.data.split(":", 1)[1])
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(config.ADMIN_ID, "✏️ قیمت جدید رو بفرست (برای توافقی «-»):")
+    bot.register_next_step_handler(msg, sub_price_save, sid)
+
+def sub_price_save(message, sid):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:", sub_price_save, sid)
+    set_sub_price(sid, message.text)
+    bot.send_message(config.ADMIN_ID, "✅ قیمت آپدیت شد!", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sqty:"))
+def admin_sub_qty(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    sid = int(call.data.split(":", 1)[1])
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(config.ADMIN_ID, "🔢 حداقل تعداد رو بفرست (بدون محدودیت = «-»):")
+    bot.register_next_step_handler(msg, sub_qty_min, sid)
+
+def sub_qty_min(message, sid):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:", sub_qty_min, sid)
+    msg = bot.send_message(config.ADMIN_ID, "🔢 حداکثر تعداد رو بفرست (بدون محدودیت = «-»):")
+    bot.register_next_step_handler(msg, sub_qty_max, sid, message.text)
+
+def sub_qty_max(message, sid, mn):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:", sub_qty_max, sid, mn)
+    set_sub_qty(sid, mn, message.text)
+    bot.send_message(config.ADMIN_ID, "✅ محدودیت تعداد آپدیت شد!", reply_markup=admin_kb())
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("addsub:"))
+def admin_sub_add(call):
     if call.from_user.id != config.ADMIN_ID: return
     key = call.data.split(":", 1)[1]
     bot.answer_callback_query(call.id)
-    msg = bot.send_message(config.ADMIN_ID, "🛍 اسم محصول رو بفرست (مثلا: ۵۰۰ استارز):")
+    msg = bot.send_message(config.ADMIN_ID, "🧩 (۱) نام محصول رو بفرست:")
     bot.register_next_step_handler(msg, sub_add_name, key)
 
 def sub_add_name(message, key):
     if is_cancel(message): return cancel_action(message)
     if not message.text:
-        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n🛍 اسم محصول:", sub_add_name, key)
-    msg = bot.send_message(config.ADMIN_ID, "💰 قیمتش رو بفرست:")
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n🧩 (۱) نام محصول:", sub_add_name, key)
+    msg = bot.send_message(config.ADMIN_ID, "💰 (۲) قیمت رو بفرست (برای توافقی «-»):")
     bot.register_next_step_handler(msg, sub_add_price, key, message.text)
 
 def sub_add_price(message, key, name):
     if is_cancel(message): return cancel_action(message)
     if not message.text:
-        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n💰 قیمت:", sub_add_price, key, name)
-    save_sub_product(key, name, message.text)
-    bot.send_message(config.ADMIN_ID, f"✅ «{name}» اضافه شد!", reply_markup=admin_kb())
-# ==================== پیام‌های ناشناخته ====================
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n💰 (۲) قیمت:", sub_add_price, key, name)
+    msg = bot.send_message(config.ADMIN_ID, "🔢 (۳) حداقل تعداد رو بفرست (بدون محدودیت = «-»):")
+    bot.register_next_step_handler(msg, sub_add_min, key, name, message.text)
 
-@bot.message_handler(func=lambda m: True, content_types=['text'])
-def fallback(message):
-    if not is_member(message.from_user.id):
-        return bot.send_message(message.chat.id, "⚠️ اول عضو کانال شو 👇", reply_markup=join_kb)
-    bot.send_message(message.chat.id, "🤔 متوجه نشدم! از دکمه‌های منو استفاده کن 🙏", reply_markup=main_kb)
+def sub_add_min(message, key, name, price):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:", sub_add_min, key, name, price)
+    msg = bot.send_message(config.ADMIN_ID, "🔢 (۴) حداکثر تعداد رو بفرست (بدون محدودیت = «-»):")
+    bot.register_next_step_handler(msg, sub_add_max, key, name, price, message.text)
+
+def sub_add_max(message, key, name, price, mn):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:", sub_add_max, key, name, price, mn)
+    save_sub_product(key, name, price, mn, message.text)
+    bot.send_message(config.ADMIN_ID,
+        f"✅ «{name}» به دستگاه اضافه شد!\nالان کاربرا می‌تونن ببیننش 🛍",
+        reply_markup=admin_kb())
 
 
-init_db()
-print("🤖 ربات ONYX روشن شد!")
-bot.infinity_polling()
+if __name__ == "__main__":
+    init_db()
+    print("✅ ربات ONYX اجرا شد")
+    bot.infinity_polling()
