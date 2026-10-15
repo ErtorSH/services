@@ -19,7 +19,7 @@ BOT_USERNAME = None
 
 def db():
     con = sqlite3.connect(DB_NAME)
-    con.row_factory = sqlite3.Row   # ⚠️ فیکس اصلی — دسترسی با اسم ستون
+    con.row_factory = sqlite3.Row 
     return con
 
 def now():
