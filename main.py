@@ -613,7 +613,7 @@ def receipt_sub_start(call):
         bot.register_next_step_handler(msg, sub_ask_qty, sid, {})
         return
     msg = bot.send_message(call.message.chat.id,
-        "📝 نام و نام خانوادگی خودت رو بفرست:\n\n❌ برای لغو، یه دکمه منو بزن یا /cancel")
+        "📝توضیحات برای ادمین ارسال کنید:\n\n❌ برای لغو، یه دکمه منو بزن یا /cancel")
     bot.register_next_step_handler(msg, form_sub_name, sid, {})
 
 def sub_ask_qty(message, sid, data):
@@ -639,7 +639,7 @@ def sub_ask_qty(message, sid, data):
         return
     data["qty"] = qty
     msg = bot.send_message(message.chat.id,
-        "📝 نام و نام خانوادگی خودت رو بفرست:\n\n❌ برای لغو، یه دکمه منو بزن یا /cancel")
+        "📝توضیحات برای ادمین ارسال کنید:\n\n❌ برای لغو، یه دکمه منو بزن یا /cancel")
     bot.register_next_step_handler(msg, form_sub_name, sid, data)
 
 def form_sub_name(message, sid, data):
@@ -1282,8 +1282,10 @@ def order_detail_view(chat, mid, oid):
     if status.startswith("⏳"):
         kb.add(InlineKeyboardButton("✅ تایید", callback_data=f"ost:{oid}:ok"),
                InlineKeyboardButton("❌ رد", callback_data=f"ost:{oid}:no"))
+    kb.add(InlineKeyboardButton("✅ اتمام کار و اطلاع به مشتری", callback_data=f"ordone:{oid}"))
     kb.add(InlineKeyboardButton("🔙 سفارشات", callback_data="adm:orders"))
     try_edit(chat, mid, txt, kb)
+
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("ost:"))
 def order_status_change(call):
@@ -1301,6 +1303,44 @@ def order_status_change(call):
         pass
     bot.answer_callback_query(call.id, "انجام شد ✅")
     order_detail_view(call.message.chat.id, call.message.message_id, oid)
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("ordone:"))
+def order_done_notify(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    oid = int(call.data.split(":")[1])
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(config.ADMIN_ID,
+        f"📩 پیامی که می‌خوای به مشتری سفارش #{oid} برسه رو بنویس:\n\n"
+        "(مثلاً: سفارشت آماده شد و استارزها ارسال شد ✅)\n"
+        "❌ برای لغو /cancel")
+    bot.register_next_step_handler(msg, order_done_send, oid)
+
+def order_done_send(message, oid):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:", order_done_send, oid)
+    row = get_order(oid)
+    if not row:
+        return bot.send_message(config.ADMIN_ID, "⚠️ سفارش پیدا نشد!")
+    if not row["status"].startswith("❌"):
+        update_order_status(oid, "📦 تحویل شد")
+        new_status = "📦 تحویل شد"
+    else:
+        new_status = row["status"]
+    try:
+        bot.send_message(row["user_id"],
+            f"🎉 سفارش #{oid} آماده شد!\n"
+            "━━━━━━━━━━\n"
+            f"📦 محصول: {row['product_name']}\n"
+            f"📍 وضعیت: {new_status}\n"
+            "━━━━━━━━━━\n"
+            f"💬 پیام پشتیبانی:\n{message.text}\n\n"
+            "🤍 ONYX — از اعتمادت ممنونیم!")
+        bot.send_message(config.ADMIN_ID,
+            f"✅ اطلاع‌رسانی سفارش #{oid} انجام شد!", reply_markup=admin_kb())
+    except Exception:
+        bot.send_message(config.ADMIN_ID, "❌ ارسال نشد (کاربر ربات رو بلاک کرده).")
 
 # ---------- پیام همگانی ----------
 
