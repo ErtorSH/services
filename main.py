@@ -67,7 +67,6 @@ def init_db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, device_key TEXT,
         name TEXT, price TEXT, available INTEGER DEFAULT 1,
         min_qty TEXT DEFAULT '-', max_qty TEXT DEFAULT '-')""")
-    # ستون‌های جدید برای دیتابیس‌های قدیمی
     for col in ("points", "wallet_notified"):
         try:
             cur.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
@@ -84,6 +83,12 @@ def init_db():
     cur.execute("UPDATE sub_products SET max_qty='-' WHERE max_qty IS NULL")
     cur.execute("""CREATE TABLE IF NOT EXISTS settings(
         k TEXT PRIMARY KEY, value TEXT)""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS channels(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, ch TEXT UNIQUE)""")
+    if cur.execute("SELECT value FROM settings WHERE k='channels_seeded'").fetchone() is None:
+        if getattr(config, "CHANNEL", None):
+            cur.execute("INSERT OR IGNORE INTO channels(ch) VALUES(?)", (config.CHANNEL,))
+        cur.execute("INSERT OR REPLACE INTO settings(k, value) VALUES('channels_seeded','1')")
     if not cur.execute("SELECT 1 FROM products LIMIT 1").fetchone():
         cur.executemany("INSERT INTO products VALUES(?,?,?,?,?,1)", DEFAULT_PRODUCTS)
     con.commit(); con.close()
@@ -257,25 +262,52 @@ def set_setting(key, value):
 
 # ==================== عضویت اجباری ====================
 
-join_kb = InlineKeyboardMarkup()
-join_kb.add(InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{config.CHANNEL.replace('@', '')}"))
-join_kb.add(InlineKeyboardButton("✅ عضو شدم", callback_data="check_membership"))
+def build_join_kb():
+    kb = InlineKeyboardMarkup(row_width=1)
+    for row in all_channels():
+        ch = row["ch"]
+        kb.add(InlineKeyboardButton(f"📢 عضویت در {ch}", url=f"https://t.me/{ch.replace('@', '')}"))
+    kb.add(InlineKeyboardButton("✅ عضو شدم", callback_data="check_membership"))
+    return kb
 
 def is_member(user_id):
-    try:
-        m = bot.get_chat_member(config.CHANNEL, user_id)
-        return m.status in ["member", "administrator", "creator", "restricted"]
-    except Exception:
-        return False
+    chans = all_channels()
+    if not chans:
+        return True   # چنلی ثبت نشده، همه آزادن
+    for row in chans:
+        ch = row["ch"]
+        try:
+            m = bot.get_chat_member(ch, user_id)
+            if m.status not in ["member", "administrator", "creator", "restricted"]:
+                return False
+        except Exception:
+            continue 
+    return True
 
 def membership_required(func):
     @wraps(func)
     def wrapper(message):
         if not is_member(message.from_user.id):
-            bot.send_message(message.chat.id, "⚠️ برای استفاده از ربات باید عضو کانال بشی 👇", reply_markup=join_kb)
+            bot.send_message(message.chat.id, "سلام! برای استفاده از ربات اول عضو کانال شو 👇", reply_markup=build_join_kb())
             return
         return func(message)
     return wrapper
+
+
+# ----- چنل‌های عضویت اجباری -----
+
+def add_channel(ch):
+    con = db(); cur = con.cursor()
+    cur.execute("INSERT OR IGNORE INTO channels(ch) VALUES(?)", (ch,))
+    con.commit(); con.close()
+
+def del_channel(cid):
+    con = db(); con.execute("DELETE FROM channels WHERE id=?", (cid,)); con.commit(); con.close()
+
+def all_channels():
+    con = db()
+    rows = con.execute("SELECT id, ch FROM channels ORDER BY id").fetchall()
+    con.close(); return rows
 
 # ==================== منوی اصلی ====================
 
@@ -335,7 +367,7 @@ def welcome(message):
     is_new = save_user(message.from_user.id, message.from_user.first_name,
                        f"@{message.from_user.username}" if message.from_user.username else None, referrer)
     if not is_member(message.from_user.id):
-        bot.send_message(message.chat.id, "سلام! برای استفاده از ربات اول عضو کانال شو 👇", reply_markup=join_kb)
+        bot.send_message(message.chat.id, "سلام! برای استفاده از ربات اول عضو کانال شو 👇", reply_markup=build_join_kb())
         return
     txt = WELCOME
     if is_new and referrer:
@@ -1014,7 +1046,8 @@ def admin_kb():
            InlineKeyboardButton("💬 مکالمات", callback_data="adm:support"))
     kb.add(InlineKeyboardButton("💰 کیف پول‌ها", callback_data="adm:wallets"),
            InlineKeyboardButton("📦 چنل انبار", callback_data="adm:warehouse"))
-    kb.add(InlineKeyboardButton("🏠 منوی اصلی", callback_data="adm:menu"))
+    kb.add(InlineKeyboardButton("📢 چنل‌های اجباری", callback_data="adm:channels"),
+           InlineKeyboardButton("🏠 منوی اصلی", callback_data="adm:menu"))
     return kb
 
 
@@ -1023,6 +1056,60 @@ def admin_panel(message):
     if message.from_user.id != config.ADMIN_ID:
         return bot.send_message(message.chat.id, "⛔️ دسترسی نداری!", reply_markup=main_kb)
     bot.send_message(message.chat.id, "💻 پنل مدیریت ONYX\nیکی رو انتخاب کن:", reply_markup=admin_kb())
+
+def channels_view(chat, mid):
+    rows = all_channels()
+    kb = InlineKeyboardMarkup(row_width=1)
+    if rows:
+        for row in rows:
+            kb.add(InlineKeyboardButton(f"🗑 {row['ch']}", callback_data=f"delchan:{row['id']}"))
+    else:
+        kb.add(InlineKeyboardButton("چنلی ثبت نشده 🍃", callback_data="noop"))
+    kb.add(InlineKeyboardButton("➕ افزودن چنل", callback_data="addchan"))
+    kb.add(InlineKeyboardButton("🔙 پنل", callback_data="admback"))
+    try_edit(chat, mid, "📢 چنل‌های عضویت اجباری:\n(برای حذف، روی چنل بزن 👇)", kb)
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("delchan:"))
+def delchan_handler(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    del_channel(int(call.data.split(":")[1]))
+    bot.answer_callback_query(call.id, "حذف شد 🗑")
+    channels_view(call.message.chat.id, call.message.message_id)
+
+@bot.callback_query_handler(func=lambda c: c.data == "addchan")
+def addchan_start(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    msg = bot.send_message(config.ADMIN_ID,
+        "📢 آیدی چنل اجباری جدید رو بفرست (مثل @mychannel):\n\n"
+        "⚠️ ربات باید تو این چنل «ادمین» باشه تا بتونه عضویت رو چک کنه!\n"
+        "❌ برای لغو /cancel")
+    bot.register_next_step_handler(msg, addchan_save)
+
+def addchan_save(message):
+    if is_cancel(message): return cancel_action(message)
+    if not message.text:
+        return reask(config.ADMIN_ID, "⚠️ متنی بفرست:\n\n📢 آیدی چنل (مثل @mychannel):", addchan_save)
+    ch = message.text.strip()
+    try:
+        info = bot.get_chat(ch)
+    except Exception:
+        return reask(config.ADMIN_ID, "❌ این آیدی پیدا نشد!\n\n📢 دوباره بفرست:", addchan_save)
+    if info.type != "channel":
+        return reask(config.ADMIN_ID, f"⚠️ «{ch}» چنل نیست!\n\n📢 آیدی یه چنل واقعی بفرست:", addchan_save)
+    try:
+        me = bot.get_chat_member(ch, bot.get_me().id)
+        if me.status not in ["administrator", "creator"]:
+            return reask(config.ADMIN_ID,
+                "⚠️ ربات تو این چنل ادمین نیست!\n"
+                "اول ربات رو ادمین کن، بعد دوباره بفرست:\n\n📢 آیدی چنل:", addchan_save)
+    except Exception:
+        return reask(config.ADMIN_ID,
+            "⚠️ نتونستم وضعیت ربات رو تو چنل چک کنم!\n"
+            "ربات رو ادمین کن و دوباره بفرست:\n\n📢 آیدی چنل:", addchan_save)
+    add_channel(ch)
+    bot.send_message(config.ADMIN_ID,
+        f"✅ چنل «{info.title}» ({ch}) به عضویت اجباری اضافه شد!", reply_markup=admin_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("adm:"))
 def admin_actions(call):
@@ -1034,6 +1121,9 @@ def admin_actions(call):
 
     if act == "menu":
         return bot.send_message(chat, "🏠 منوی اصلی:", reply_markup=main_kb)
+
+    if act == "channels":
+        return channels_view(chat, mid)
 
     if act == "stats":
         t = datetime.now().strftime("%Y-%m-%d")
@@ -1087,6 +1177,7 @@ def admin_actions(call):
                    "که تو چنل پستش کنه یا نه ✅")
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("✏️ تغییر چنل", callback_data="whset"))
+            kb.add(InlineKeyboardButton("🧪 تست ارسال", callback_data="whtest"))
         else:
             txt = ("📦 چنل انبار\n"
                    "━━━━━━━━━━\n"
@@ -1670,15 +1761,34 @@ def wh_post_action(call):
     key, name, price, mn = pending_wh_post
     pending_wh_post = None
     ch = get_setting("warehouse_channel")
+    url_kb = InlineKeyboardMarkup()
+    url_kb.add(InlineKeyboardButton("🛍 خرید خدمات از ربات", url=f"https://t.me/{get_bot_username()}"))
     try:
         bot.send_message(ch, warehouse_post_text(key, name, price, mn),
-                         parse_mode="HTML", disable_web_page_preview=True)
+                         parse_mode="HTML", disable_web_page_preview=True,
+                         reply_markup=url_kb)
         try_edit(call.message.chat.id, call.message.message_id,
                  "✅ تو چنل انبار پست شد! 📦", None)
-    except Exception:
+    except Exception as e:
         try_edit(call.message.chat.id, call.message.message_id,
-                 "❌ ارسال به چنل نشد!\n"
-                 "ربات رو تو چنل ادمین کن (دسترسی ارسال پیام) و دوباره امتحان کن.", None)
+                 f"❌ ارسال به چنل نشد!\n\n⚠️ خطا: {e}", None)
+
+@bot.callback_query_handler(func=lambda c: c.data == "whtest")
+def wh_test(call):
+    if call.from_user.id != config.ADMIN_ID: return
+    bot.answer_callback_query(call.id)
+    ch = get_setting("warehouse_channel")
+    if not ch:
+        return bot.send_message(config.ADMIN_ID, "❌ اول چنل رو ثبت کن!")
+    url_kb = InlineKeyboardMarkup()
+    url_kb.add(InlineKeyboardButton("🛍 خرید خدمات از ربات", url=f"https://t.me/{get_bot_username()}"))
+    try:
+        bot.send_message(ch, warehouse_post_text("test", "محصول آزمایشی ✨", "۵,۰۰۰ تومان", "۵"),
+                         parse_mode="HTML", disable_web_page_preview=True, reply_markup=url_kb)
+        bot.send_message(config.ADMIN_ID,
+            f"✅ پست آزمایشی ارسال شد به: {ch}\n👉 برو چنل رو چک کن!")
+    except Exception as e:
+        bot.send_message(config.ADMIN_ID, f"❌ ارسال نشد!\n\n⚠️ خطا: {e}")
 
 if __name__ == "__main__":
     init_db()
