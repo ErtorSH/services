@@ -1,3 +1,5 @@
+import os
+import threading
 from telebot import TeleBot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from functools import wraps
@@ -8,7 +10,20 @@ import config
 import html as html_mod
 import sys
 sys.stdout.reconfigure(encoding='utf-8')
+import os
+from flask import Flask
+from threading import Thread
 
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return 'Bot is alive!'
+
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 10000)))
+
+Thread(target=run_flask, daemon=True).start()
 
 bot = TeleBot(config.TOKEN)
 DB_NAME = "onyx.db"
