@@ -1830,6 +1830,102 @@ def wh_test(call):
     except Exception as e:
         bot.send_message(config.ADMIN_ID, f"❌ ارسال نشد!\n\n⚠️ خطا: {e}")
 
+# ==================== بکاپ خودکار دیتابیس ====================
+import os
+import glob
+from datetime import datetime as dt
+
+BACKUP_CHAT_ID = config.ADMIN_ID  # بکاپ‌ها به پیوی ادمین می‌رن
+BACKUP_HOUR = 3                   # هر روز ساعت ۳ (به وقت سرور)
+
+_last_backup_day = {"day": None}
+
+def send_db_backup():
+    """فایل دیتابیس رو به پیوی ادمین می‌فرسته"""
+    try:
+        if not os.path.exists(DB_NAME):
+            return
+        with open(DB_NAME, "rb") as f:
+            bot.send_document(BACKUP_CHAT_ID, f,
+                caption=f"📦 بکاپ خودکار دیتابیس\n📅 {now()}")
+    except Exception as e:
+        print(f"backup send error: {e}")
+
+def _backup_loop():
+    """حلقه‌ای که هر روز سر ساعت بکاپ می‌فرسته"""
+    import threading as _th
+    def runner():
+        while True:
+            today = dt.now().strftime("%Y-%m-%d")
+            current_hour = dt.now().hour
+            if _last_backup_day["day"] != today and current_hour >= BACKUP_HOUR:
+                _last_backup_day["day"] = today
+                send_db_backup()
+            time.sleep(60 * 10)  # هر ۱۰ دقیقه چک می‌کنه
+    t = _th.Thread(target=runner, daemon=True)
+    t.start()
+
+def restore_if_empty():
+    """اگه دیتابیس خالی بود (رندر ری‌استارت شده)، آخرین بکاپ از تلگرام برمی‌گرده"""
+    try:
+        con = db()
+        c = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        o = con.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        con.close()
+        if c > 0 or o > 0:
+            print("✅ دیتابیس سالمه — بکاپ لازم نیست")
+            return
+
+        # دنبال آخرین فایل بکاپ تو خود سرور بگرد (اگه از قبل دانلود شده)
+        backups = sorted(glob.glob("restore_*.db"))
+        if backups:
+            import shutil
+            shutil.copy(backups[-1], DB_NAME)
+            print("♻️ دیتابیس از بکاپ لوکال بازیابی شد")
+            return
+
+        # از تلگرام بخواه بکاپو بفرسته
+        bot.send_message(BACKUP_CHAT_ID,
+            "⚠️ سرور ری‌استارت شده و دیتابیس خالیه!\n\n"
+            "📤 آخرین فایل بکاپ (.db) که برات اومده رو **فوروارد کن همینجا** —\n"
+            "ربات خودش برمی‌گردونه و سفارشا نجات پیدا می‌کنن.")
+    except Exception as e:
+        print(f"restore check error: {e}")
+
+@bot.message_handler(content_types=['document'])
+def restore_backup_doc(message):
+    """اگه ادمین فایل .db فرستاد → بازیابی دیتابیس"""
+    if message.from_user.id != config.ADMIN_ID: return
+    doc = message.document
+    if not (doc.file_name and doc.file_name.endswith(".db")):
+        bot.reply_to(message, "⚠️ فقط فایل .db قبوله")
+        return
+    try:
+        fi = bot.get_file(doc.file_id)
+        downloaded = bot.download_file(fi.file_path)
+        with open("restore_tmp.db", "wb") as f:
+            f.write(downloaded)
+        import shutil
+        shutil.copy("restore_tmp.db", "restore_" + dt.now().strftime("%Y%m%d") + ".db")
+        shutil.copy("restore_tmp.db", DB_NAME)
+        bot.reply_to(message,
+            "♻️ دیتابیس بازیابی شد!\n"
+            "🔄 برای اعمال کامل، ربات چند ثانیه دیگه خودش رو تازه می‌کنه.\n"
+            "(سفارشا و کاربرا برگشتن ✅)")
+        # رستارت منطقی: polling قطع و وصل
+        bot.stop_polling()
+    except Exception as e:
+        bot.reply_to(message, f"❌ بازیابی نشد: {e}")
+
+# اجرای بکاپ و چک بازیابی موقع استارت
+try:
+    restore_if_empty()
+except Exception as e:
+    print(f"restore error: {e}")
+
+_backup_loop()
+
+
 if __name__ == "__main__":
     init_db()
     print("✅ ربات ONYX اجرا شد")
