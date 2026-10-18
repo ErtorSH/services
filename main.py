@@ -26,7 +26,7 @@ def run_flask():
 Thread(target=run_flask, daemon=True).start()
 
 bot = TeleBot(config.TOKEN)
-DB_NAME = "onyx.db"
+DB_NAME = os.environ.get("DB_PATH", "onyx.db")
 SUPPORT_MODE = set()
 pending_broadcast = None
 BOT_USERNAME = None
@@ -1941,7 +1941,51 @@ except Exception as e:
 _backup_loop()
 
 
-if __name__ == "__main__":
+# ==================== Render: Health Endpoint ====================
+from flask import Flask, jsonify
+from werkzeug.serving import make_server
+
+app = Flask(__name__)
+
+@app.route("/health")
+@app.route("/")
+def health_check():
+    try:
+        con = db()
+        users = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        orders = con.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        con.close()
+        return jsonify({"status":"ok","bot":"ONYX","users":users,"orders":orders,"time":now()}), 200
+    except Exception as e:
+        return jsonify({"status":"error","message":str(e)}), 500
+
+def run_bot_polling():
     init_db()
-    print("✅ ربات ONYX اجرا شد")
-    bot.infinity_polling()
+    print("✅ ربات ONYX اجرا شد", flush=True)
+    while True:
+        try:
+            bot.infinity_polling(timeout=20, long_polling_timeout=5)
+        except Exception as e:
+            print(f"❌ Polling error: {e} — restart in 5s", flush=True)
+            time.sleep(5)
+
+class ServerThread(threading.Thread):
+    def __init__(self, app, host, port):
+        threading.Thread.__init__(self)
+        self.server = make_server(host, port, app)
+        self.daemon = True
+    def run(self):
+        print(f"🌐 Health endpoint on port {self.server.port}", flush=True)
+        self.server.serve_forever()
+
+if __name__ == "__main__":
+    bot_thread = threading.Thread(target=run_bot_polling, daemon=True)
+    bot_thread.start()
+    port = int(os.environ.get("PORT", 10000))
+    server = ServerThread(app, "0.0.0.0", port)
+    server.start()
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        print("Shutting down...", flush=True)
